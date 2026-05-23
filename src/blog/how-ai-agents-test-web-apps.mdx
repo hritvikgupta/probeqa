@@ -1,0 +1,104 @@
+export const meta = {
+  slug: 'how-ai-agents-test-web-apps',
+  title: 'How AI Agents Test Web Apps: The Perception and Action Loop',
+  description:
+    'A look under the hood at how an autonomous testing agent drives a real browser, sees the page, picks the next action, and verifies the result, and why that loop survives UI changes that break scripted tests.',
+  keywords:
+    'how AI agents test, browser automation AI, perception action loop, autonomous testing internals, AI QA engineering, Probe agent',
+  date: '2026-05-06',
+  dateLabel: 'May 6, 2026',
+  readingTime: '6 min read',
+  author: 'Probe Team',
+  tag: 'Engineering',
+  cover: 'engineering',
+};
+
+When people first see an AI agent test a web app, the common question
+is: how does it actually know what to click? It has no script and no
+list of selectors. This post opens up the loop and walks through what
+happens on every step of a real test run.
+
+## One browser, one goal
+
+A run starts with a goal in plain language and a live browser page. The
+goal might be "add a product to the cart and complete checkout with the
+test card." From there the agent is on its own. There is no recorded
+path it is replaying. It works the steps out as it goes.
+
+## The loop, step by step
+
+Every step the agent takes is the same four-part cycle.
+
+### 1. See the page
+
+The agent captures the page two ways at once. It takes a **screenshot**,
+which tells it what a human would see: layout, what is visible, what
+looks broken. And it reads the **DOM and accessibility tree**, which
+tells it the precise structure, the real elements, their roles and
+attributes. The screenshot answers "what should I act on." The DOM
+answers "how do I target it precisely."
+
+Using both matters. A screenshot alone cannot give a reliable selector.
+The accessibility tree alone is often incomplete, plenty of pages ship
+unlabelled inputs or make a plain div clickable. Together they are
+enough to act confidently.
+
+### 2. Decide the next action
+
+With the goal and the current page in hand, the agent reasons about the
+**single next step**. Not the whole plan, just the next move. "The cart
+is empty, so first I need to open the product page." This one-step-at-a-
+time discipline is what keeps the agent grounded: it always decides from
+the page that is actually in front of it.
+
+### 3. Act in the real browser
+
+The agent performs exactly one action: a click, a keystroke, a wait for
+something to load. Then it stops and observes. It never fires a burst of
+actions blind.
+
+### 4. Verify
+
+After acting, the agent looks again. Did the page change the way it
+expected? If a test asked it to confirm an order, it explicitly checks
+that the confirmation text is on screen and records a **pass** or a
+**fail**. Verification is a first-class step, not an afterthought.
+
+The loop repeats until the goal is reached or something is clearly
+broken.
+
+## Why this survives UI changes
+
+A scripted test hard-codes the path. Change a class name and the script
+cannot find its element. The agent never hard-codes anything. On every
+run it re-derives the steps from the page as it currently is. Rename a
+button, restructure a form, add a modal, the agent simply sees the new
+layout and adapts. The only thing that makes it fail is a genuine
+functional break, which is exactly what you want a test to catch.
+
+## Handling the messy parts
+
+Real apps are not tidy. Pages are slow, popups appear, networks hang.
+A robust agent handles this explicitly:
+
+- **Waiting.** After anything slow, a generation, an upload, a
+  processing submit, the agent waits for a completion signal instead of
+  asserting too early or hammering the page with screenshots.
+- **Surprises.** An unexpected redirect or error dialog is treated as a
+  new page state to reason about, not a crash.
+- **Flakes.** A failure that does not reproduce on a clean re-run is
+  labelled flaky and kept out of your bug tracker. See
+  [Probe 2.0](/blog/announcing-probe-2) for how flake-aware retries
+  work.
+
+## The takeaway
+
+An AI testing agent is not a faster way to run scripts. It is a
+different model entirely: perceive, decide, act, verify, in a loop, from
+the live page. That is what lets it test like a person instead of like a
+recording, and why a stale selector can never again fail a green build.
+
+<p className="cta-line">
+  Want to watch the loop run on your site?
+  <a href="/signup">Start with Probe</a>.
+</p>

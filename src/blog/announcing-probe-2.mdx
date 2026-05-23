@@ -1,0 +1,144 @@
+export const meta = {
+  slug: 'announcing-probe-2',
+  title: 'Announcing Probe 2.0: Agents That File Their Own Tickets',
+  description:
+    'Probe 2.0 is the biggest upgrade to our web-testing agent since launch. Agents now file Linear, Jira, and GitHub tickets automatically, run in parallel, and tell real bugs apart from flakes. Here is what changed and what it unlocks.',
+  keywords:
+    'Probe 2.0, AI testing agent, automated QA, autonomous web testing, Linear ticket automation, flake detection, parallel test runs, Probe release',
+  date: '2026-05-20',
+  dateLabel: 'May 20, 2026',
+  readingTime: '6 min read',
+  author: 'Probe Team',
+  tag: 'Launch',
+  cover: 'launch',
+};
+
+Today we are shipping **Probe 2.0**, the biggest upgrade to our
+web-testing agent since launch. The headline change: when Probe finds a
+bug, it now **files the ticket for you**, in Linear, Jira, or GitHub,
+with a clear title, reproduction steps, and the failing screenshot
+attached. No more copy-pasting a run summary into your tracker.
+
+Underneath that, 2.0 is faster, runs tests in parallel, and finally
+knows the difference between a real bug and a flaky test. This post
+covers what changed, where the gains come from, and what you need to do
+to upgrade (spoiler: nothing).
+
+## What's new
+
+### Agents file their own tickets
+
+This is the change everyone asked for. Before 2.0, Probe drove the
+browser, found the bug, and handed you a report. You still had to open
+your tracker and write the ticket. Now Probe does it: when a run records
+a failure, the agent opens a ticket in the connected tool with a
+descriptive title, the exact steps it took, the expected versus actual
+result, console errors, and the screenshot at the moment of failure.
+Duplicate detection means a bug that fails on three releases in a row
+becomes one ticket with three comments, not three noisy tickets.
+
+### Parallel test runs
+
+A Probe 2.0 workspace spins up multiple isolated browser sessions at
+once. A suite that used to walk twelve flows one after another now runs
+them across parallel agents and finishes in a fraction of the time.
+Each session is fully isolated, so a login in one flow never leaks into
+another.
+
+### Flake-aware retries
+
+The single most annoying thing about automated testing is a test that
+fails for no reason. Probe 2.0 carries an explicit confidence signal
+and, on a failure, re-runs the exact same steps in a fresh session
+before deciding. A failure that does not reproduce is labelled a
+**flake** and kept out of your ticket tracker. A failure that
+reproduces is filed. Noise goes down, trust goes up.
+
+### Faster browser perception
+
+The vision backbone that reads each page is new. It identifies
+buttons, inputs, and small UI controls in roughly a third of the time,
+which is what makes parallel runs practical without a huge cost
+increase.
+
+## The numbers
+
+Across a representative sample of customer suites running in April 2026:
+
+| Metric                          | Probe 1.x  | Probe 2.0  | Change          |
+| -------------------------------- | ---------- | ---------- | --------------- |
+| Suite wall-clock time            | baseline   | 0.24x      | **4.1x faster** |
+| Real bugs caught per release     | baseline   | 1.7x       | +70%            |
+| False-positive (flake) tickets   | baseline   | 0.18x      | **-82%**        |
+| Time from bug found to ticket    | manual     | automatic  | seconds         |
+| Per-step perception latency      | baseline   | 0.34x      | -66%            |
+
+These are medians across real suites, checkout flows, signup, billing,
+auth, mobile webviews, not curated benchmark scores. Your individual
+numbers will vary.
+
+## Where the gains come from
+
+The speed comes from two places. Parallelism is the obvious one. The
+less obvious one is that the previous bottleneck was never the agent's
+reasoning, it was the number of times it re-read the page just to be
+sure something had changed. The new perception backbone is fast and
+confident enough that Probe can skip most of those redundant reads.
+
+The reliability gains come from flake-aware retries. A large share of
+pre-2.0 tickets were not bugs at all, they were timing issues, slow
+networks, and animations that had not settled. Re-running the exact
+failing steps in a clean session before filing anything removes that
+whole category of noise.
+
+If you are new to how an agent tests a site at all, our explainer on
+[how AI agents test web apps](/blog/how-ai-agents-test-web-apps) walks
+through the perception and action loop step by step.
+
+## What you need to do
+
+Nothing. Every Probe workspace is on 2.0 as of today. Existing test
+plans run unchanged. To turn on automatic ticket filing, connect Linear,
+Jira, or GitHub in your workspace Integrations tab and pick the project
+each agent should file into. Until you connect a tracker, Probe behaves
+exactly as before and just hands you the report.
+
+## What's next
+
+Three things we are working on for next quarter:
+
+- **Scheduled suites** that run on every deploy and post a summary to
+  Slack.
+- **Visual regression** checks that flag unintended layout changes, not
+  just functional failures.
+- **Cross-page state** so an agent can carry a cart or a session across
+  a multi-step purchase and assert at the end.
+
+For now, Probe 2.0 is live in your workspace, and the next run will
+already be faster and quieter.
+
+## Frequently asked questions
+
+**Do I need to change my test plans?**
+No. Existing plans run unchanged on 2.0. Automatic ticket filing is the
+only thing that needs a one-time integration setup.
+
+**What if Probe files a ticket for something that is not a bug?**
+Flake-aware retries are designed to prevent exactly that. A failure is
+only filed if it reproduces in a clean session. If something still slips
+through, closing the ticket teaches the agent for that workspace.
+
+**Does 2.0 cost more?**
+No. Per-step perception is cheaper, and parallel runs reuse the same
+budget. Pricing on every plan is unchanged.
+
+**Which trackers are supported?**
+Linear, Jira, and GitHub Issues at launch. More are coming based on what
+customers connect most.
+
+<p className="cta-line">
+  Want to see Probe 2.0 on your own site?
+  <a href="/signup">Get started with Probe</a>, or read
+  [what an AI testing agent actually is](/blog/what-is-an-ai-testing-agent)
+  if you are new to the category.
+</p>

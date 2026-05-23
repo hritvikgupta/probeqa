@@ -1,0 +1,90 @@
+export const meta = {
+  slug: 'what-is-an-ai-testing-agent',
+  title: 'What Is an AI Testing Agent? A Practical Guide',
+  description:
+    'An AI testing agent is software that drives a real browser to test a web app the way a human QA engineer would, no scripts, no selectors to maintain. Here is a clear explanation of what it is, how it works, and where it fits.',
+  keywords:
+    'AI testing agent, what is an AI testing agent, autonomous QA, automated browser testing, AI QA engineer, end to end testing AI, Probe',
+  date: '2026-05-12',
+  dateLabel: 'May 12, 2026',
+  readingTime: '5 min read',
+  author: 'Probe Team',
+  tag: 'Guide',
+  cover: 'guide',
+};
+
+An **AI testing agent** is software that tests a web application the way
+a human QA engineer does: it opens a real browser, looks at the page,
+decides what to do next, clicks and types, and checks whether the result
+matches what was expected. It does not read your source code and it does
+not run a brittle script of CSS selectors. It interacts with the running
+app, the same surface your users see.
+
+This guide explains what that means in practice, how it differs from
+traditional test automation, and where an agent fits in a real
+engineering team.
+
+## The problem with scripted tests
+
+Traditional end-to-end tests are scripts. Someone writes, in code, "find
+the element with this selector, click it, then find that element, type
+this text." The scripts work until the moment the UI changes. A renamed
+class, a restructured form, a new modal, and the selector breaks. The
+test fails, but not because the app is broken, because the script is
+stale. Teams end up spending more time maintaining the test suite than
+the suite saves them.
+
+An AI testing agent removes the script. You describe the goal in plain
+language, "sign up a new user and confirm they land on the dashboard,"
+and the agent works out the steps itself, every time it runs, against
+whatever the page currently looks like.
+
+## How an AI testing agent works
+
+Under the hood, an agent runs a simple loop:
+
+1. **Look.** It takes a screenshot and reads the page structure, the
+   same way a person glances at a screen to see what is there.
+2. **Decide.** Based on the goal and what it sees, it picks the single
+   next action: click this button, type into that field, wait for a
+   result.
+3. **Act.** It performs the action in the real browser.
+4. **Check.** It looks again to confirm the action did what it expected,
+   and records a pass or a fail.
+
+The loop repeats until the goal is met or something is clearly broken.
+Because the agent decides what to do from the live page on every run, a
+cosmetic UI change does not break it. A real functional bug does.
+
+## What an agent can test today
+
+- **Critical flows** like signup, login, checkout, and password reset.
+- **Forms and validation**, including the error states most scripts
+  never bother to cover.
+- **Cross-cutting checks** like broken links, console errors, and failed
+  network requests.
+- **Visible regressions** after a deploy, run the same goals again and
+  compare.
+
+It is genuinely good at the tedious, repetitive verification work that
+humans do slowly and skip when they are busy. It is not a replacement
+for human judgement on product quality, design, or whether a feature is
+the right feature.
+
+## Where it fits in a team
+
+The most common pattern: an agent runs the critical-path suite on every
+release, so regressions are caught before customers see them, and human
+QA time goes to exploratory testing and edge cases that need a person's
+intuition. The agent handles the "did we break the basics again" check
+that nobody enjoys doing by hand.
+
+For a closer look at the mechanics, see
+[how AI agents test web apps](/blog/how-ai-agents-test-web-apps). For
+why scripted suites stop scaling, see
+[why manual QA does not scale](/blog/manual-qa-doesnt-scale).
+
+<p className="cta-line">
+  Curious what an agent finds on your site?
+  <a href="/signup">Try Probe</a> and point it at a flow.
+</p>

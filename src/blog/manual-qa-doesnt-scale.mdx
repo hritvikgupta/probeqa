@@ -1,0 +1,96 @@
+export const meta = {
+  slug: 'manual-qa-doesnt-scale',
+  title: 'Why Manual QA Does Not Scale, and What to Do About It',
+  description:
+    'Manual testing and brittle scripted suites both break down as a product grows. Here is why the regression-testing problem gets worse with every release, and how autonomous agents change the math.',
+  keywords:
+    'manual QA, regression testing, test automation maintenance, QA scaling, flaky tests, autonomous testing, Probe',
+  date: '2026-04-28',
+  dateLabel: 'April 28, 2026',
+  readingTime: '5 min read',
+  author: 'Probe Team',
+  tag: 'Perspective',
+  cover: 'perspective',
+};
+
+Every growing product hits the same wall. The app gets bigger, releases
+get more frequent, and the cost of making sure nothing broke grows
+faster than the team. There are two usual responses, and both break
+down. This post explains why, and what a third option looks like.
+
+## Response one: test it by hand
+
+Early on, a person clicks through the critical flows before each
+release. It works because there are only a handful of flows and one
+release a week.
+
+Then the product grows. Ten flows become fifty. One release a week
+becomes ten a day. The same person now cannot possibly re-check
+everything, so they check the part that changed and hope the rest is
+fine. Regressions slip through, not because anyone was careless, but
+because **manual coverage cannot keep pace with release frequency**. The
+work is also genuinely dull, which means it gets rushed exactly when the
+team is busiest, which is exactly when bugs ship.
+
+## Response two: automate it with scripts
+
+So teams write end-to-end scripts. For a while this feels like the fix.
+Then the maintenance cost shows up.
+
+Scripted tests are coupled to the UI through selectors. Every time the
+UI changes, and a healthy product's UI changes constantly, some
+selectors go stale. The test fails. An engineer investigates, discovers
+the app is fine and the script is wrong, and patches the script. Repeat
+across hundreds of tests and you have a suite that needs a part-time
+engineer just to keep it green.
+
+Worse, a suite that fails often gets ignored. Once "the build is red"
+stops meaning "something is broken," the suite has stopped doing its
+job. **Flaky, high-maintenance tests are not much better than no
+tests.**
+
+## The real problem
+
+Both responses fight the same root issue: verifying a release is
+**repetitive, high-volume work that still needs judgement**. Humans have
+the judgement but cannot do the volume. Scripts can do the volume but
+have no judgement, so they break on anything they were not told about in
+advance.
+
+## The third option: autonomous agents
+
+An AI testing agent has both. It does the volume, dozens of flows on
+every release without tiring, and it brings enough judgement to adapt to
+a UI that changed. You give it the goal in plain language, "check that
+checkout completes with a valid card," and it works out the steps
+against the live page each run. A renamed button does not fail the test.
+A real broken checkout does.
+
+That changes the math:
+
+- **Coverage stops competing with release frequency.** The agent re-runs
+  the full critical-path suite on every deploy, not just the part
+  someone had time for.
+- **There is no script to maintain.** Nothing is coupled to a selector,
+  so a UI change does not create a maintenance ticket.
+- **Red means red.** With [flake-aware retries](/blog/announcing-probe-2),
+  a failure is only reported if it reproduces, so a red build is worth
+  paying attention to again.
+
+Human QA does not disappear. It moves to where judgement actually pays
+off: exploratory testing, edge cases, and product quality questions a
+checklist can never capture. The repetitive regression sweep, the part
+that does not scale, is handed to the agent.
+
+## The bottom line
+
+Manual QA does not scale because volume beats people. Scripted QA does
+not scale because maintenance beats the savings. An autonomous agent is
+the first option that scales with the product instead of against it.
+For how that agent actually works, see
+[how AI agents test web apps](/blog/how-ai-agents-test-web-apps).
+
+<p className="cta-line">
+  Tired of maintaining a brittle suite?
+  <a href="/signup">See what Probe catches</a> on your critical flows.
+</p>

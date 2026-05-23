@@ -1,0 +1,90 @@
+export const meta = {
+  slug: 'measuring-test-coverage-with-agents',
+  title: 'Measuring Real Test Coverage with Autonomous Agents',
+  description:
+    'Line coverage tells you which code ran, not whether your product works. Here is how to think about coverage when an agent tests the way a user does, and the three signals that actually matter.',
+  keywords:
+    'test coverage, end to end coverage, flow coverage, AI testing metrics, regression coverage, autonomous QA metrics, Probe',
+  date: '2026-04-20',
+  dateLabel: 'April 20, 2026',
+  readingTime: '5 min read',
+  author: 'Probe Team',
+  tag: 'Guide',
+  cover: 'guide',
+};
+
+Ask a team how well their app is tested and the answer is usually a
+percentage: line coverage. It is a comforting number and a misleading
+one. Line coverage tells you which lines of code executed during a test.
+It says nothing about whether a user can actually complete a purchase.
+This post is about coverage that means something.
+
+## Why line coverage misses the point
+
+A test can run a line of code without checking that the line does the
+right thing. You can hit 90% line coverage and still ship a checkout
+that 500-errors, because the test that touched the checkout code never
+asserted that the order confirmation appeared.
+
+Line coverage measures **code executed**. What you actually care about is
+**user outcomes verified**. Those are different things, and an agent that
+tests through the browser measures the second one directly.
+
+## The three signals that matter
+
+When an agent tests like a user, coverage becomes three concrete
+questions.
+
+### 1. Flow coverage
+
+Of the journeys that matter, signup, login, checkout, password reset,
+billing, how many does an agent actually walk end to end on each
+release? This is the number to track. Ten critical flows, all exercised
+on every deploy, is far more meaningful than 90% of lines touched by
+unit tests.
+
+### 2. Assertion depth
+
+Walking a flow is not the same as testing it. For each flow, how many
+real expectations are checked? Not just "the page loaded," but "the
+confirmation number is shown," "the email field rejects a bad address,"
+"the total matches the line items." An agent should record an explicit
+pass or fail for every expectation, so depth is countable.
+
+### 3. State coverage
+
+The happy path is the easy half. Real coverage includes the error
+states: the declined card, the taken username, the expired session, the
+empty cart. These are where bugs hide and where scripted suites are
+thinnest, because someone had to remember to script each one. An agent
+asked to "try an invalid card and confirm the error" explores those
+branches without a hand-written script per case.
+
+## How to use these in practice
+
+Put the three signals on a dashboard and watch the trend, not the
+absolute number:
+
+- **Flow coverage** should equal your list of critical journeys. If it
+  is lower, you have flows nobody is checking on release.
+- **Assertion depth** should rise as you harden each flow. A flow with
+  one assertion is barely tested.
+- **State coverage** is your early-warning system. New error states
+  added to the product should show up here, or they are untested.
+
+A run that walks every flow, checks every expectation, and exercises the
+error branches is worth more than any line-coverage figure. For how an
+agent decides what to check on a page, see
+[how AI agents test web apps](/blog/how-ai-agents-test-web-apps).
+
+## The takeaway
+
+Coverage is not a percentage of code. It is a question of whether the
+outcomes your users depend on were actually verified. Measure flows,
+assertions, and states, and you will know something true about your
+product instead of something comforting about your code.
+
+<p className="cta-line">
+  Want this measured automatically on every release?
+  <a href="/signup">Get started with Probe</a>.
+</p>

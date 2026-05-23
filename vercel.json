@@ -1,0 +1,33 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "framework": "vite",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ],
+  "redirects": [
+    { "source": "/login",           "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/login",           "permanent": false },
+    { "source": "/login",           "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/login",           "permanent": false },
+    { "source": "/signup",          "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/signup",          "permanent": false },
+    { "source": "/signup",          "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/signup",          "permanent": false },
+    { "source": "/overview",        "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/overview",        "permanent": false },
+    { "source": "/overview",        "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/overview",        "permanent": false },
+    { "source": "/runs",            "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/runs",            "permanent": false },
+    { "source": "/runs",            "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/runs",            "permanent": false },
+    { "source": "/agents",          "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/agents",          "permanent": false },
+    { "source": "/agents",          "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/agents",          "permanent": false },
+    { "source": "/agents/:path*",   "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/agents/:path*",   "permanent": false },
+    { "source": "/agents/:path*",   "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/agents/:path*",   "permanent": false },
+    { "source": "/tickets",         "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/tickets",         "permanent": false },
+    { "source": "/tickets",         "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/tickets",         "permanent": false },
+    { "source": "/settings",        "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/settings",        "permanent": false },
+    { "source": "/settings",        "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/settings",        "permanent": false },
+    { "source": "/billing",         "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/billing",         "permanent": false },
+    { "source": "/billing",         "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/billing",         "permanent": false },
+    { "source": "/billing/:path*",  "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/billing/:path*",  "permanent": false },
+    { "source": "/billing/:path*",  "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/billing/:path*",  "permanent": false },
+    { "source": "/editor",          "has": [{ "type": "host", "value": "probeqa.com" }],     "destination": "https://app.probeqa.com/editor",          "permanent": false },
+    { "source": "/editor",          "has": [{ "type": "host", "value": "www.probeqa.com" }], "destination": "https://app.probeqa.com/editor",          "permanent": false }
+  ]
+}
