@@ -476,10 +476,10 @@ export default function Landing() {
               <line x1="21" y1="21" x2="16.6" y2="16.6" />
             </svg>
           </button>
-          <a className="btn-text" onClick={() => navigate('/login')} style={{ cursor: 'pointer' }}>
+          <a className="btn-text" href="/login">
             Log in
           </a>
-          <a className="btn-pixel" onClick={() => navigate('/signup')} style={{ cursor: 'pointer' }}>
+          <a className="btn-pixel" href="/signup">
             Sign up
             {arrow}
           </a>
@@ -504,7 +504,7 @@ export default function Landing() {
                   not weeks. No scripts to maintain.
                 </p>
                 <div className="hero-ctas">
-                  <a className="hero-btn-dark" onClick={() => navigate('/signup')} style={{ cursor: 'pointer' }}>
+                  <a className="hero-btn-dark" href="/signup">
                     Get started
                     {arrow}
                   </a>
@@ -598,7 +598,7 @@ export default function Landing() {
           Four layers between your intent and a closed ticket. The planner picks the path, the agent
           drives the surface, and the observer catches everything in between.
         </p>
-        <a className="btn-pixel flow-cta" onClick={() => navigate('/signup')} style={{ cursor: 'pointer' }}>
+        <a className="btn-pixel flow-cta" href="/signup">
           Explore the platform
           {arrow}
         </a>
@@ -1024,11 +1024,7 @@ export default function Landing() {
                 <li>Web &amp; API testing</li>
                 <li>Community support</li>
               </ul>
-              <a
-                className="price-cta ghost"
-                onClick={() => navigate('/signup')}
-                style={{ cursor: 'pointer' }}
-              >
+              <a className="price-cta ghost" href="/signup">
                 Get started
                 {arrow}
               </a>
@@ -1050,11 +1046,7 @@ export default function Landing() {
                 <li>GitHub, Slack &amp; Linear integrations</li>
                 <li>Priority support</li>
               </ul>
-              <a
-                className="price-cta"
-                onClick={() => navigate('/signup')}
-                style={{ cursor: 'pointer' }}
-              >
+              <a className="price-cta" href="/signup">
                 Start with Pro
                 {arrow}
               </a>
@@ -1071,7 +1063,7 @@ export default function Landing() {
         <div className="cta-inner">
           <div className="cta-eyebrow">Get started</div>
           <h2 className="cta-h">Ship faster — let the agents test.</h2>
-          <a className="cta-btn" onClick={() => navigate('/signup')} style={{ cursor: 'pointer' }}>
+          <a className="cta-btn" href="/signup">
             Get started
             {arrow}
           </a>
