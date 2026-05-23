@@ -1,0 +1,18 @@
+{
+  "name": "Probe",
+  "short_name": "Probe",
+  "description": "Agentic testing for the AI-native team.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#F4F2EA",
+  "theme_color": "#0E0F0C",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+# https://www.robotstxt.org — robots policy for the Probe marketing site.
+User-agent: *
+Allow: /
+
+# The authed app subdomain is private — keep it out of search results.
+Disallow: /api/
+Disallow: /billing/success
+Disallow: /overview
+Disallow: /runs
+Disallow: /agents
+Disallow: /tickets
+Disallow: /settings
+Disallow: /billing
+Disallow: /editor
+Disallow: /login
+Disallow: /signup
+
+Sitemap: https://www.probeqa.com/sitemap.xml
