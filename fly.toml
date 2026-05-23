@@ -1,4 +1,4 @@
-app = "probe-app"
+app = "probeqa"
 primary_region = "iad"
 
 [build]
