@@ -24,6 +24,7 @@ npm-debug.log*
 .tmp/
 .cache/
 server/.data/
+server/.screenshots/
 
 # --- Fly ---
 fly.toml.bak

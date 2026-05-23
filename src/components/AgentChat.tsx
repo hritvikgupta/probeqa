@@ -220,6 +220,24 @@ export default function AgentChat({
   // conversation id). Runs on mount — the component is keyed by chatId.
   // `loaded` gates sending so a follow-up can't race ahead of the history.
   const [loaded, setLoaded] = useState(false)
+  // The active LLM is set server-side via LLM_MODEL — fetch it once so the
+  // header label tracks the real model instead of a stale hardcoded value.
+  const [activeModel, setActiveModel] = useState<string>('')
+  useEffect(() => {
+    let cancelled = false
+    fetch('/api/health')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (cancelled) return
+        const full = String(d?.model ?? '')
+        // Drop the vendor prefix ("qwen/qwen3-coder-flash" → "qwen3-coder-flash").
+        setActiveModel(full.includes('/') ? full.split('/').slice(1).join('/') : full)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
   useEffect(() => {
     let cancelled = false
     fetch(`/api/conversations/${chatId}`)
@@ -305,7 +323,7 @@ export default function AgentChat({
       >
         <span style={{ color: 'var(--ink-3)', fontSize: 11, fontWeight: 500 }}>Testing agent</span>
         <span style={{ color: 'var(--ink-4)', fontFamily: 'var(--mono)', fontSize: 10.5 }}>
-          grok-build-0.1 · playwright
+          {activeModel || '…'} · playwright
         </span>
         <button
           className="btn-ghost"
