@@ -83,6 +83,20 @@
 .lp .icon-btn svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.8}
 .lp .btn-text{display:inline-flex;align-items:center;gap:6px;padding:9px 14px;color:var(--ink);font-weight:500;font-size:13.5px}
 .lp .btn-text:hover{background:var(--panel)}
+/* Cross-product chip → MyAgentTrainer. Subtle outline so it doesn't outshine Sign up. */
+.lp .btn-cross{
+  display:inline-flex;align-items:center;gap:8px;
+  padding:7px 11px 7px 13px;font-weight:500;font-size:13.5px;
+  color:var(--ink);background:var(--panel);
+  border:1px solid var(--line);border-radius:8px;
+  transition:background .15s ease,border-color .15s ease;
+}
+.lp .btn-cross:hover{background:var(--bg);border-color:var(--ink-3)}
+.lp .new-pill{
+  font-size:9.5px;font-weight:700;letter-spacing:.08em;
+  padding:2px 6px;border-radius:999px;
+  background:var(--grass);color:#0a1a07;
+}
 /* Pixel-edged button: 2px stepped border via box-shadow stack */
 .lp .btn-pixel{
   display:inline-flex;align-items:center;gap:7px;
@@ -529,6 +543,8 @@
   .lp .spot{grid-template-columns:1fr}
   .lp .spot-visual{border-left:0;border-top:1px solid var(--line)}
   .lp nav.menu{display:none}
+  /* Tight mobile nav — hide cross-promo to keep Log in + Sign up unobstructed. */
+  .lp .btn-cross{display:none}
   .lp header.nav{padding:14px 18px}
   .lp .nav-inner{gap:12px}
   .lp .features,.lp .flow,.lp footer,.lp .trusted,.lp .stack,.lp .handoff{padding-left:18px;padding-right:18px}

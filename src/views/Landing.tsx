@@ -470,6 +470,17 @@ export default function Landing() {
         </nav>
         <div className="nav-spacer" />
         <div className="nav-right">
+          {/* Cross-link to our sibling product — open in a new tab so Probe stays loaded. */}
+          <a
+            className="btn-cross"
+            href="https://www.myagentrainer.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Open MyAgentTrainer in a new tab"
+          >
+            Train your agent
+            <span className="new-pill">NEW</span>
+          </a>
           <button className="icon-btn" aria-label="Search">
             <svg viewBox="0 0 24 24">
               <circle cx="11" cy="11" r="7" />
