@@ -467,20 +467,20 @@ export default function Landing() {
           <a onClick={() => scrollTo('pricing')} style={{ cursor: 'pointer' }}>Pricing</a>
           <a onClick={() => navigate('/blog')} style={{ cursor: 'pointer' }}>Blog</a>
           <a onClick={() => navigate('/docs')} style={{ cursor: 'pointer' }}>Docs</a>
-        </nav>
-        <div className="nav-spacer" />
-        <div className="nav-right">
-          {/* Cross-link to our sibling product — open in a new tab so Probe stays loaded. */}
+          {/* Cross-link → sibling product. Sits in the left menu so it reads as a feature link. */}
           <a
-            className="btn-cross"
+            className="menu-cross"
             href="https://www.myagentrainer.com"
             target="_blank"
             rel="noopener noreferrer"
-            title="Open MyAgentTrainer in a new tab"
+            title="Train an agent by recording a screen video — opens MyAgentTrainer in a new tab"
           >
-            Train your agent
+            Train by recording
             <span className="new-pill">NEW</span>
           </a>
+        </nav>
+        <div className="nav-spacer" />
+        <div className="nav-right">
           <button className="icon-btn" aria-label="Search">
             <svg viewBox="0 0 24 24">
               <circle cx="11" cy="11" r="7" />
