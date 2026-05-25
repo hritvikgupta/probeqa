@@ -1,0 +1,19 @@
+# Keep these out of the Docker build context entirely. Two reasons:
+#   1) Smaller image, faster builds.
+#   2) Defence-in-depth — nothing in `.env`/`server/.env` can ever ride
+#      into a `COPY` directive by accident and then override Fly secrets
+#      at runtime via dotenv. Trainer-app got bitten by exactly this: a
+#      stale local key overrode a rotated Fly secret because server/.env
+#      had been silently baked into the image.
+node_modules
+dist
+.git
+.github
+.vercel
+.fly
+.env
+.env.*
+**/.env
+**/.env.*
+*.log
+.DS_Store
