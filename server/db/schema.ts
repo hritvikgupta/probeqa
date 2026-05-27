@@ -130,6 +130,18 @@ export const agents = pgTable('agents', {
 })
 
 /**
+ * Sticky-routing table — which Fly machine currently holds the live browser
+ * session for a given chatId. Set on the first /api/agent request for a chat;
+ * subsequent requests get fly-replay'd to that machine so the browser tab
+ * stays usable across the multi-machine pool.
+ */
+export const chatOwners = pgTable('chat_owners', {
+  chatId: text('chat_id').primaryKey(),
+  instanceId: text('instance_id').notNull(),
+  updatedAt: timestamp('updated_at').notNull().defaultNow(),
+})
+
+/**
  * A saved chat conversation. Scoped either to an agent (the workspace
  * "Planning" chat) or to a project (the Editor chat) — exactly one of
  * agentId / projectId identifies where it belongs.
@@ -155,3 +167,4 @@ export type UserRow = typeof users.$inferSelect
 export type AgentRow = typeof agents.$inferSelect
 export type ProjectRow = typeof projects.$inferSelect
 export type ConversationRow = typeof conversations.$inferSelect
+export type ChatOwnerRow = typeof chatOwners.$inferSelect

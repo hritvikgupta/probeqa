@@ -28,3 +28,6 @@ server/.screenshots/
 
 # --- Fly ---
 fly.toml.bak
+
+# --- Lead-finder output (private prospect list, not for the repo) ---
+scripts/leads/

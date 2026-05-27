@@ -44,11 +44,33 @@ fly deploy
 fly certs add app.probeqa.com   # then add the printed A/AAAA records at your registrar
 ```
 
-DB schema (run any time the `users` / `agents` / `projects` schema changes):
+DB schema (run any time the `users` / `agents` / `projects` / `chat_owners` schema changes):
 
 ```bash
 DATABASE_URL="<neon-url>" npm run db:push
 ```
+
+### Autoscaling — baseline + overflow workers
+
+`fly.toml` defines two machine pools:
+
+| Pool     | Spec                          | When it runs                                                  |
+| -------- | ----------------------------- | ------------------------------------------------------------- |
+| `app`    | 1 GB / shared / 1 CPU         | Always (`min_machines_running = 1`) — handles everyday load.  |
+| `worker` | 8 GB / performance / 2 CPUs   | Suspended at zero cost; auto-wakes when `app` hits >5 conns.  |
+
+Pre-create the overflow workers once. They stay suspended (free) until needed:
+
+```bash
+fly scale count worker=3   # three 8 GB boxes, suspended, ready to wake
+fly scale count worker=0   # turn the overflow tier off entirely
+```
+
+`/api/agent` and the browser-frame routes set a `fly-replay` header so requests
+for the same `chatId` always reach the machine that holds that user's Playwright
+browser — the `chat_owners` table records the owner. Per-machine Chromium
+concurrency is capped automatically from RAM: 3 contexts on a 1 GB box,
+~12 on an 8 GB worker. Override with the `BROWSER_CONCURRENCY` env var.
 
 ---
 

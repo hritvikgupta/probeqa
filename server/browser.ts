@@ -11,8 +11,52 @@ import { tool } from 'ai'
 import { z } from 'zod'
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
+import { totalmem } from 'node:os'
 import { getAgent, updateAgent, type Agent, type TestStep } from './store.ts'
 import { githubCreateIssue } from './composio.ts'
+
+/**
+ * Per-machine cap on concurrent Chromium contexts. Sized from the machine's
+ * actual RAM so the 1 GB baseline and the 8 GB workers each get the right
+ * ceiling without any per-process config:
+ *   1 GB  → 3   2 GB → 5   4 GB → 8   8 GB → 12   16 GB+ → 20
+ * Override at boot with BROWSER_CONCURRENCY if you need to pin it.
+ */
+const BROWSER_CONCURRENCY = (() => {
+  const override = Number(process.env.BROWSER_CONCURRENCY)
+  if (Number.isFinite(override) && override > 0) return Math.floor(override)
+  const gb = totalmem() / (1024 ** 3)
+  if (gb < 1.5) return 3
+  if (gb < 3) return 5
+  if (gb < 6) return 8
+  if (gb < 12) return 12
+  return 20
+})()
+
+/**
+ * Tiny FIFO semaphore. Anyone wanting a Chromium context first awaits a
+ * permit; when concurrency is at the cap, new callers queue instead of
+ * spawning yet another browser and OOMing the machine.
+ */
+const browserPermits = {
+  inUse: 0,
+  waiters: [] as Array<() => void>,
+  async acquire(): Promise<void> {
+    if (this.inUse < BROWSER_CONCURRENCY) {
+      this.inUse++
+      return
+    }
+    await new Promise<void>((resolve) => this.waiters.push(resolve))
+    this.inUse++
+  },
+  release(): void {
+    this.inUse--
+    const next = this.waiters.shift()
+    if (next) next()
+  },
+}
+
+console.log(`[probe-agent] browser concurrency cap: ${BROWSER_CONCURRENCY}`)
 
 /** Per-run context: the agent whose accounts / settings the agent may use. */
 export interface AgentContext {
@@ -93,9 +137,22 @@ async function getSession(chatId: string): Promise<Session> {
     return existing
   }
 
-  const browser = await getBrowser()
-  const context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
-  const page = await context.newPage()
+  // Block until a Chromium permit is free. This is what keeps a single
+  // machine from spawning more browsers than its RAM can hold; once the cap
+  // is reached, the next agent call waits here instead of crashing the box.
+  await browserPermits.acquire()
+
+  let context: BrowserContext
+  let page: Page
+  try {
+    const browser = await getBrowser()
+    context = await browser.newContext({ viewport: { width: 1280, height: 800 } })
+    page = await context.newPage()
+  } catch (e) {
+    // Hand the permit back if we never managed to create the context.
+    browserPermits.release()
+    throw e
+  }
 
   const consoleErrors: string[] = []
   page.on('console', (m) => {
@@ -108,6 +165,119 @@ async function getSession(chatId: string): Promise<Session> {
     )
   })
 
+  // Per-context init: re-runs on every navigation. Three responsibilities:
+  //   1. Keep navigations in this tab (strip target= + override window.open)
+  //   2. Inject a virtual cursor overlay so the screencast shows where the
+  //      mouse is moving (Playwright's synthesized clicks have no visible OS
+  //      cursor in headless mode — we draw our own that follows mousemove
+  //      events the agent's mouse.move() calls generate).
+  await context.addInitScript(() => {
+    /* -------- popup / tab containment -------- */
+    const stripTargets = () => {
+      document.querySelectorAll('a[target]').forEach((a) => a.removeAttribute('target'))
+    }
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      ;(window as any).open = function (url?: string | URL) {
+        if (url) window.location.href = String(url)
+        return null
+      }
+    } catch {
+      /* ignore */
+    }
+    if (document.readyState !== 'loading') stripTargets()
+    document.addEventListener('DOMContentLoaded', stripTargets)
+    new MutationObserver(stripTargets).observe(document.documentElement || document, {
+      childList: true,
+      subtree: true,
+      attributeFilter: ['target'],
+    })
+
+    /* -------- virtual cursor overlay --------
+       Reasoning: the CDP screencast only emits frames on big repaints, and
+       the fallback poller fires every 900ms. The cursor must be BIG (visible
+       in a single low-frequency frame), persist its last position across
+       repaints, and start at a visible spot so screenshots taken before the
+       first click still show "the mouse is here". */
+    const installCursor = () => {
+      const root = document.body || document.documentElement
+      if (!root || document.getElementById('__probe_cursor')) return
+      const c = document.createElement('div')
+      c.id = '__probe_cursor'
+      c.setAttribute('aria-hidden', 'true')
+      // Start visible — pulled from storage if we have a position from a prior
+      // page in this session; otherwise centered-ish near the top-left.
+      const last = (() => {
+        try {
+          const raw = sessionStorage.getItem('__probe_cursor_pos')
+          if (!raw) return null
+          const [x, y] = raw.split(',').map(Number)
+          if (Number.isFinite(x) && Number.isFinite(y)) return { x, y }
+        } catch {
+          /* sessionStorage may be unavailable on some origins */
+        }
+        return null
+      })() ?? { x: 200, y: 200 }
+      c.style.cssText =
+        'position:fixed;left:0;top:0;width:32px;height:32px;' +
+        'pointer-events:none;z-index:2147483647;' +
+        `transform:translate3d(${last.x}px,${last.y}px,0);` +
+        'transition:transform 80ms linear,filter 80ms ease;' +
+        'filter:drop-shadow(0 3px 6px rgba(0,0,0,0.55));' +
+        'will-change:transform'
+      c.innerHTML =
+        '<svg width="32" height="32" viewBox="0 0 24 24" fill="none" ' +
+        'xmlns="http://www.w3.org/2000/svg">' +
+        '<path d="M5 3 L5 19 L9 15 L11 21 L14 20 L12 14 L18 14 Z" ' +
+        'fill="#FFFFFF" stroke="#0E0F0C" stroke-width="2" ' +
+        'stroke-linejoin="round"/></svg>'
+      root.appendChild(c)
+
+      const move = (e: MouseEvent) => {
+        c.style.transform = `translate3d(${e.clientX}px,${e.clientY}px,0)`
+        try {
+          sessionStorage.setItem('__probe_cursor_pos', `${e.clientX},${e.clientY}`)
+        } catch {
+          /* ignore */
+        }
+      }
+      window.addEventListener('mousemove', move, { capture: true })
+
+      // Click ripple — green pulse on mousedown.
+      const ring = document.createElement('div')
+      ring.id = '__probe_cursor_ring'
+      ring.style.cssText =
+        'position:fixed;left:0;top:0;width:40px;height:40px;border-radius:50%;' +
+        'border:3px solid #5BBA3B;pointer-events:none;z-index:2147483646;' +
+        'transform:translate3d(-100px,-100px,0) scale(0.3);opacity:0;'
+      root.appendChild(ring)
+      window.addEventListener(
+        'mousedown',
+        (e) => {
+          ring.style.transition = 'none'
+          ring.style.transform = `translate3d(${e.clientX - 20}px,${e.clientY - 20}px,0) scale(0.3)`
+          ring.style.opacity = '1'
+          requestAnimationFrame(() => {
+            ring.style.transition = 'transform 500ms ease-out,opacity 500ms ease-out'
+            ring.style.transform = `translate3d(${e.clientX - 20}px,${e.clientY - 20}px,0) scale(1.6)`
+            ring.style.opacity = '0'
+          })
+        },
+        { capture: true },
+      )
+
+      // Re-attach the cursor if the page's own scripts remove it (SPAs that
+      // rewrite document.body can wipe our overlay).
+      new MutationObserver(() => {
+        if (!document.getElementById('__probe_cursor')) {
+          if (document.body) installCursor()
+        }
+      }).observe(document.documentElement, { childList: true, subtree: true })
+    }
+    if (document.body) installCursor()
+    else document.addEventListener('DOMContentLoaded', installCursor)
+  })
+
   const session: Session = {
     context,
     page,
@@ -118,6 +288,15 @@ async function getSession(chatId: string): Promise<Session> {
     frameTimer: null,
   }
   sessions.set(chatId, session)
+
+  // Safety net: if a popup *does* still slip through (e.g. an OAuth flow that
+  // bypasses our overrides), swap the session's page reference to it so the
+  // agent acts against the user's actual landing tab.
+  context.on('page', (newPage) => {
+    console.log(`[session ${chatId.slice(0, 8)}] popup detected → switching to`, newPage.url())
+    session.page = newPage
+    newPage.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`))
+  })
 
   // Live screencast → frame hub. If it fails, the agent still works headless.
   try {
@@ -166,6 +345,7 @@ export async function resetSession(chatId: string): Promise<void> {
   sessions.delete(chatId)
   if (s.frameTimer) clearInterval(s.frameTimer)
   await s.context.close().catch(() => {})
+  browserPermits.release()
 }
 
 /**
@@ -196,9 +376,119 @@ setInterval(() => {
       hubs.delete(id)
       if (s.frameTimer) clearInterval(s.frameTimer)
       s.context.close().catch(() => {})
+      // Return the Chromium permit so the next waiting agent can run.
+      browserPermits.release()
     }
   }
 }, 60_000).unref()
+
+/**
+ * Server-side cursor injection. Belt + suspenders to addInitScript: ensures
+ * the cursor exists right before any animation, even if the page's own
+ * scripts wiped it or if addInitScript silently failed.
+ */
+const CURSOR_INJECT_SCRIPT = `(() => {
+  if (window.__probeCursorReady && document.getElementById('__probe_cursor')) return 'already-present';
+  const root = document.body || document.documentElement;
+  if (!root) return 'no-root';
+  const existing = document.getElementById('__probe_cursor');
+  if (existing) existing.remove();
+  const existingRing = document.getElementById('__probe_cursor_ring');
+  if (existingRing) existingRing.remove();
+  const c = document.createElement('div');
+  c.id = '__probe_cursor';
+  c.setAttribute('aria-hidden', 'true');
+  // Restore last known position from sessionStorage so the cursor persists
+  // across page navigations.
+  let lx = 200, ly = 200;
+  try {
+    const raw = sessionStorage.getItem('__probe_cursor_pos');
+    if (raw) {
+      const [x, y] = raw.split(',').map(Number);
+      if (Number.isFinite(x) && Number.isFinite(y)) { lx = x; ly = y; }
+    }
+  } catch (e) {}
+  c.style.cssText =
+    'position:fixed!important;left:0!important;top:0!important;' +
+    'width:36px!important;height:36px!important;' +
+    'pointer-events:none!important;z-index:2147483647!important;' +
+    'transform:translate3d(' + lx + 'px,' + ly + 'px,0)!important;' +
+    'transition:transform 80ms linear!important;' +
+    'filter:drop-shadow(0 3px 8px rgba(0,0,0,0.7))!important;' +
+    'display:block!important;visibility:visible!important;opacity:1!important;';
+  c.innerHTML =
+    '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" ' +
+    'xmlns="http://www.w3.org/2000/svg">' +
+    '<path d="M5 3 L5 19 L9 15 L11 21 L14 20 L12 14 L18 14 Z" ' +
+    'fill="#FFFFFF" stroke="#0E0F0C" stroke-width="2" ' +
+    'stroke-linejoin="round"/></svg>';
+  root.appendChild(c);
+  const move = (e) => {
+    c.style.transform = 'translate3d(' + e.clientX + 'px,' + e.clientY + 'px,0)';
+    try { sessionStorage.setItem('__probe_cursor_pos', e.clientX + ',' + e.clientY); } catch (e2) {}
+  };
+  if (!window.__probeCursorListenerAdded) {
+    window.addEventListener('mousemove', move, { capture: true });
+    window.__probeCursorListenerAdded = true;
+  }
+  // Click ripple.
+  const ring = document.createElement('div');
+  ring.id = '__probe_cursor_ring';
+  ring.style.cssText =
+    'position:fixed!important;left:0!important;top:0!important;' +
+    'width:44px!important;height:44px!important;border-radius:50%!important;' +
+    'border:3px solid #5BBA3B!important;pointer-events:none!important;' +
+    'z-index:2147483646!important;' +
+    'transform:translate3d(-100px,-100px,0) scale(0.3);opacity:0;';
+  root.appendChild(ring);
+  if (!window.__probeRingListenerAdded) {
+    window.addEventListener('mousedown', (e) => {
+      ring.style.transition = 'none';
+      ring.style.transform = 'translate3d(' + (e.clientX-22) + 'px,' + (e.clientY-22) + 'px,0) scale(0.3)';
+      ring.style.opacity = '1';
+      requestAnimationFrame(() => {
+        ring.style.transition = 'transform 500ms ease-out,opacity 500ms ease-out';
+        ring.style.transform = 'translate3d(' + (e.clientX-22) + 'px,' + (e.clientY-22) + 'px,0) scale(1.6)';
+        ring.style.opacity = '0';
+      });
+    }, { capture: true });
+    window.__probeRingListenerAdded = true;
+  }
+  window.__probeCursorReady = true;
+  return 'installed';
+})()`
+
+async function ensureCursor(page: Page): Promise<void> {
+  try {
+    await page.evaluate(CURSOR_INJECT_SCRIPT)
+  } catch {
+    /* page may be navigating — addInitScript will re-install on next load */
+  }
+}
+
+/**
+ * Smoothly move Playwright's mouse to the center of a located element so the
+ * virtual cursor overlay traces a visible path across the screencast before
+ * the click/fill fires. Best-effort — if the element can't be located/measured
+ * we just no-op and let the action proceed.
+ */
+async function animateMouseTo(page: Page, loc: ReturnType<Page['locator']>): Promise<void> {
+  try {
+    // Belt + suspenders: re-inject the cursor right before we animate, in
+    // case the SPA wiped it since the last action.
+    await ensureCursor(page)
+    const box = await loc.first().boundingBox({ timeout: 2_000 })
+    if (!box) return
+    const targetX = box.x + box.width / 2
+    const targetY = box.y + box.height / 2
+    // Slow the move so the ~800ms BrowserView poll captures the cursor mid-
+    // path, then dwell at the target so a poll lands while it's hovering.
+    await page.mouse.move(targetX, targetY, { steps: 60 })
+    await page.waitForTimeout(500)
+  } catch {
+    /* swallow — the action will proceed without the cursor animation */
+  }
+}
 
 function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n)}\n…[truncated, ${s.length - n} more chars]` : s
@@ -337,7 +627,12 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
         const { page } = await getSession(chatId)
         try {
           const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30_000 })
-          await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+          // Let the page settle. networkidle is best-effort; we don't want to
+          // fail the call just because a long-poll keeps the connection open.
+          await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {})
+          // Install the cursor on the freshly loaded page so it's visible from
+          // the first /api/browser/frame poll even before any click.
+          await ensureCursor(page)
           return { ok: true, url: page.url(), title: await page.title(), status: resp?.status() ?? null }
         } catch (e) {
           return { ok: false, error: String(e) }
@@ -347,13 +642,93 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
 
     inspect_page: tool({
       description:
-        'Get the accessibility tree of the current page — headings, buttons, links, inputs and their accessible names. A quick overview. If a control has no accessible name, or you need to act on something the tree does not show (a clickable div, an icon, a custom widget), call get_html instead — that is the ground truth.',
+        'Your PRIMARY way to look at the page. Returns the accessibility tree (every link, button, input, heading with its accessible name) PLUS a list of selector hints for inputs and clickable elements whose accessible name is missing (gives you placeholder, data-testid, type, nearby text — enough to act on them without get_html). Use this between actions. Only fall back to get_html when this returns something incomplete or you need a region of raw markup.',
       inputSchema: z.object({}),
       execute: async () => {
         const { page } = await getSession(chatId)
         try {
-          const tree = await page.locator('body').ariaSnapshot()
-          return { ok: true, url: page.url(), tree: truncate(tree, 6_000) }
+          // If a navigation is in flight, wait for it to settle so neither
+          // ariaSnapshot nor evaluate runs against a doomed execution context.
+          await page.waitForLoadState('domcontentloaded', { timeout: 5_000 }).catch(() => {})
+          const tree = await page
+            .locator('body')
+            .ariaSnapshot()
+            .catch(() => '')
+          // "Hints" — non-accessibility attributes that help target unnamed
+          // inputs, custom-widget buttons, and testid-tagged elements. The
+          // model can use these as CSS selectors or as `name` for getByText.
+          // Wrapped in its own try so a mid-navigation context-destroyed error
+          // degrades to "just the aria tree" instead of failing the whole call.
+          let hints: unknown[] = []
+          try {
+            hints = await page.evaluate(() => {
+            const pick = (el: Element) => {
+              const e = el as HTMLElement & {
+                placeholder?: string
+                type?: string
+                name?: string
+                value?: string
+              }
+              const id = e.id ? `#${e.id}` : ''
+              const testid = e.getAttribute('data-testid') || ''
+              const aria = e.getAttribute('aria-label') || ''
+              const role = e.getAttribute('role') || ''
+              const type = e.type || e.tagName.toLowerCase()
+              const placeholder = e.placeholder || ''
+              const nameAttr = e.name || ''
+              // Short visible text (first 60 chars) — for unnamed buttons / divs.
+              const text = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 60)
+              const selectorParts = [e.tagName.toLowerCase()]
+              if (id) selectorParts[0] += id
+              if (testid) selectorParts[0] += `[data-testid="${testid}"]`
+              else if (type && e.tagName.toLowerCase() === 'input')
+                selectorParts[0] += `[type="${type}"]`
+              else if (nameAttr) selectorParts[0] += `[name="${nameAttr}"]`
+              return {
+                selector: selectorParts[0],
+                tag: e.tagName.toLowerCase(),
+                type: type || undefined,
+                testid: testid || undefined,
+                ariaLabel: aria || undefined,
+                role: role || undefined,
+                placeholder: placeholder || undefined,
+                name: nameAttr || undefined,
+                text: text || undefined,
+              }
+            }
+            const out: ReturnType<typeof pick>[] = []
+            const seen = new Set<Element>()
+            // Form fields and buttons are the most common "I need to act on
+            // this but the accessibility tree didn't name it well" cases.
+            document
+              .querySelectorAll('input, textarea, select, button, [role="button"], [data-testid]')
+              .forEach((el) => {
+                if (seen.has(el)) return
+                seen.add(el)
+                const r = el.getBoundingClientRect()
+                if (r.width === 0 || r.height === 0) return // skip hidden
+                const info = pick(el)
+                // If accessibility tree already names it well, skip to save tokens.
+                if (info.ariaLabel && !info.placeholder && !info.testid) return
+                out.push(info)
+              })
+            return out.slice(0, 40)
+            })
+          } catch (evalErr) {
+            // Page was probably mid-navigation — log and continue with just
+            // the aria tree. Tomorrow's call (after the model uses look/
+            // waits) will have hints again. Returning ok:false here would
+            // poison the agent into giving up on the whole step.
+            console.log(
+              `[inspect_page] hints unavailable (page in transition): ${String(evalErr).slice(0, 120)}`,
+            )
+          }
+          return {
+            ok: true,
+            url: page.url(),
+            tree: truncate(tree, 6_000),
+            hints,
+          }
         } catch (e) {
           return { ok: false, error: String(e) }
         }
@@ -391,25 +766,52 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
 
     click: tool({
       description:
-        'Click ANY element on the page. Prefer a precise CSS `selector` taken from get_html — it works for buttons, links, divs, spans, icons, custom widgets, anything. Or pass ARIA `role` + accessible `name` for clearly-labelled elements.',
+        'Click ANY element on the page. PREFER accessibility locators (role + name) — they map 1:1 to what inspect_page just showed you and survive class-name changes. CSS selector is the fallback for elements with no accessible name.',
       inputSchema: z.object({
         selector: z
           .string()
           .optional()
-          .describe('CSS selector of the element to click, e.g. "button.submit", "a[href=\\"/login\\"]". Most reliable — use this when in doubt.'),
-        role: z.string().optional().describe('ARIA role, used only when no selector is given.'),
-        name: z.string().optional().describe('Accessible name, used together with role.'),
+          .describe('CSS selector — fallback for unnamed/custom elements only. Example: "button.submit", "[data-testid=continue]".'),
+        role: z.string().optional().describe('ARIA role from inspect_page, e.g. "link", "button", "checkbox". Used with `name`.'),
+        name: z.string().optional().describe('Accessible name from inspect_page, e.g. "Sign in", "Continue".'),
       }),
       execute: async ({ selector, role, name }) => {
         const { page } = await getSession(chatId)
         const target = selector ?? `${role ?? ''} "${name ?? ''}"`.trim()
         try {
+          // Capture the URL BEFORE clicking so we can detect navigation.
+          const beforeUrl = page.url()
           const loc = selector
             ? page.locator(selector)
             : page.getByRole(role as never, { name: name ?? '' })
+          await animateMouseTo(page, loc)
           await loc.first().click({ timeout: 8_000 })
-          await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {})
-          return { ok: true, clicked: target, url: page.url() }
+
+          // Navigation handling — the click may have triggered same-page state
+          // change OR full navigation (especially cross-subdomain, e.g.
+          // cal.com -> app.cal.com which takes 2-8s). Wait properly for the
+          // new page to settle so the next tool call doesn't run against a
+          // mid-transition page (which is what destroyed inspect_page's
+          // execution context in prior failures).
+          try {
+            await page.waitForLoadState('domcontentloaded', { timeout: 15_000 })
+          } catch {
+            /* navigation may not have happened — fine, fall through */
+          }
+          await page.waitForLoadState('networkidle', { timeout: 8_000 }).catch(() => {})
+          // Re-install the cursor on the (possibly new) page so subsequent
+          // polls keep showing it. addInitScript runs first but a server-side
+          // injection is the reliable fallback.
+          await ensureCursor(page)
+
+          const afterUrl = page.url()
+          return {
+            ok: true,
+            clicked: target,
+            url: afterUrl,
+            navigated: beforeUrl !== afterUrl,
+            previousUrl: beforeUrl !== afterUrl ? beforeUrl : undefined,
+          }
         } catch (e) {
           return { ok: false, error: `Could not click ${target}: ${String(e)}` }
         }
@@ -435,6 +837,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           const loc = selector
             ? page.locator(selector)
             : page.getByRole(role as never, { name: name ?? '' })
+          await animateMouseTo(page, loc)
           await loc.first().fill(text, { timeout: 8_000 })
           return { ok: true, filled: target }
         } catch (e) {
@@ -581,6 +984,183 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
             { type: 'file-data', data: o.image, mediaType: 'image/jpeg' },
           ],
         }
+      },
+    }),
+
+    look: tool({
+      description:
+        'Look at the page in one call: screenshot (image) + accessibility tree + selector hints + url + title + any new console errors. Prefer this over screenshot/inspect_page/get_console_errors separately when you just want to see what is on the page between actions — it saves round-trips and keeps your context tight.',
+      inputSchema: z.object({}),
+      execute: async () => {
+        const { page } = await getSession(chatId)
+        try {
+          mkdirSync(SHOTS_DIR, { recursive: true })
+          const file = join(SHOTS_DIR, `${chatId}-${Date.now()}.jpg`)
+          const buf = await page.screenshot({ path: file, type: 'jpeg', quality: 55 })
+          const tree = await page.locator('body').ariaSnapshot().catch(() => '')
+          const title = await page.title().catch(() => '')
+          const url = page.url()
+          // Diagnostic log so we can see what the model is being fed each
+          // time it calls look(). Logs a summary, NOT the full base64 image.
+          console.log(
+            `[look] chat=${chatId.slice(0, 8)} url=${url} title=${JSON.stringify(title).slice(0, 80)}` +
+              ` tree=${tree.length}chars image=${Math.round(buf.length / 1024)}KB`,
+          )
+          // First ~400 chars of the aria tree so we can eyeball what the
+          // model is actually seeing without flooding the log.
+          console.log(`[look] tree-head:\n${tree.slice(0, 400)}${tree.length > 400 ? '\n…(truncated)' : ''}`)
+          return {
+            ok: true,
+            url,
+            title,
+            tree: truncate(tree, 5_000),
+            image: buf.toString('base64'),
+          }
+        } catch (e) {
+          console.error('[look] error:', e)
+          return { ok: false, error: String(e) }
+        }
+      },
+      // Same pattern as screenshot — hand the JPEG to the multimodal model as
+      // a file-data part, plus the textual context next to it.
+      toModelOutput: ({ output }) => {
+        const o = output as {
+          ok?: boolean
+          image?: string
+          url?: string
+          title?: string
+          tree?: string
+          error?: string
+        }
+        if (!o?.ok || !o.image) {
+          return {
+            type: 'content',
+            value: [{ type: 'text', text: `Look failed: ${o?.error ?? 'unknown error'}` }],
+          }
+        }
+        const txt =
+          `URL: ${o.url ?? ''}\nTitle: ${o.title ?? ''}\n\nAccessibility tree:\n${o.tree ?? ''}`
+        return {
+          type: 'content',
+          value: [
+            { type: 'text', text: txt },
+            { type: 'file-data', data: o.image, mediaType: 'image/jpeg' },
+          ],
+        }
+      },
+    }),
+
+    do_steps: tool({
+      description:
+        'Run multiple atomic browser actions in ONE call instead of round-tripping one at a time. Use it whenever a flow needs 2+ consecutive steps with no decision in between — e.g. fill email, fill password, click submit, wait_for "Welcome". Stops on the first failure and reports which step failed.',
+      inputSchema: z.object({
+        actions: z
+          .array(
+            z.union([
+              z.object({
+                type: z.literal('click'),
+                selector: z.string().optional(),
+                role: z.string().optional(),
+                name: z.string().optional(),
+              }),
+              z.object({
+                type: z.literal('fill'),
+                text: z.string(),
+                selector: z.string().optional(),
+                name: z.string().optional(),
+                role: z.string().default('textbox'),
+              }),
+              z.object({
+                type: z.literal('press_key'),
+                key: z.string(),
+              }),
+              z.object({
+                type: z.literal('wait_for'),
+                text: z.string().optional(),
+                selector: z.string().optional(),
+                state: z.enum(['visible', 'hidden', 'attached', 'detached']).default('visible'),
+                timeoutSeconds: z.number().int().min(1).max(600).default(30),
+              }),
+              z.object({
+                type: z.literal('goto'),
+                url: z.string(),
+              }),
+            ]),
+          )
+          .min(1)
+          .describe('Ordered list of actions to perform in sequence.'),
+      }),
+      execute: async ({ actions }) => {
+        const session = await getSession(chatId)
+        const { page } = session
+        const results: Array<Record<string, unknown>> = []
+        for (let i = 0; i < actions.length; i++) {
+          const a = actions[i]
+          session.lastUsed = Date.now()
+          try {
+            if (a.type === 'goto') {
+              const resp = await page.goto(a.url, {
+                waitUntil: 'domcontentloaded',
+                timeout: 30_000,
+              })
+              await page.waitForLoadState('networkidle', { timeout: 5_000 }).catch(() => {})
+              results.push({
+                step: i + 1,
+                type: 'goto',
+                ok: true,
+                url: page.url(),
+                status: resp?.status() ?? null,
+              })
+            } else if (a.type === 'click') {
+              const target = a.selector ?? `${a.role ?? ''} "${a.name ?? ''}"`.trim()
+              const loc = a.selector
+                ? page.locator(a.selector)
+                : page.getByRole((a.role as never) ?? 'button', { name: a.name ?? '' })
+              await animateMouseTo(page, loc)
+              await loc.first().click({ timeout: 8_000 })
+              await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {})
+              results.push({ step: i + 1, type: 'click', ok: true, target, url: page.url() })
+            } else if (a.type === 'fill') {
+              const target = a.selector ?? a.name ?? '(unspecified)'
+              const loc = a.selector
+                ? page.locator(a.selector)
+                : page.getByRole((a.role as never) ?? 'textbox', { name: a.name ?? '' })
+              await animateMouseTo(page, loc)
+              await loc.first().fill(a.text, { timeout: 8_000 })
+              results.push({ step: i + 1, type: 'fill', ok: true, target })
+            } else if (a.type === 'press_key') {
+              await page.keyboard.press(a.key)
+              await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {})
+              results.push({ step: i + 1, type: 'press_key', ok: true, pressed: a.key })
+            } else if (a.type === 'wait_for') {
+              if (!a.text && !a.selector) {
+                results.push({
+                  step: i + 1,
+                  type: 'wait_for',
+                  ok: false,
+                  error: 'wait_for needs either text or selector',
+                })
+                return { ok: false, completed: i, results }
+              }
+              const timeout = (a.timeoutSeconds ?? 30) * 1000
+              const loc = a.text
+                ? page.getByText(a.text, { exact: false }).first()
+                : page.locator(a.selector as string).first()
+              const startedAt = Date.now()
+              await loc.waitFor({ state: a.state, timeout })
+              results.push({
+                step: i + 1,
+                type: 'wait_for',
+                ok: true,
+                waitedMs: Date.now() - startedAt,
+              })
+            }
+          } catch (e) {
+            results.push({ step: i + 1, type: a.type, ok: false, error: String(e) })
+            return { ok: false, completed: i, results, failedAt: i + 1 }
+          }
+        }
+        return { ok: true, completed: actions.length, results, url: page.url() }
       },
     }),
 

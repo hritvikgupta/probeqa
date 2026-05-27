@@ -43,6 +43,9 @@ import {
   createConversation,
   updateConversation,
   deleteConversation,
+  claimChat,
+  touchChatOwner,
+  releaseChat,
   type Agent,
   type RunRecord,
 } from './store.ts'
@@ -82,6 +85,10 @@ const app = new Hono<{ Variables: { user: SafeUser } }>()
 
 const COOKIE = 'probe_session'
 const MONTH = 60 * 60 * 24 * 30
+
+// Identifies this Fly machine in the multi-machine pool. Populated by Fly
+// at boot; falls back to "local" in development where there's only one process.
+const INSTANCE_ID = process.env.FLY_MACHINE_ID || 'local'
 
 function errMessage(err: unknown): string {
   if (err instanceof Error) return err.message
@@ -347,6 +354,20 @@ app.post('/api/agent', async (c) => {
   if (!chatId) return c.text('Missing chatId', 400)
   if (!Array.isArray(messages)) return c.text('Missing messages[]', 400)
 
+  // Sticky routing — every chat's Playwright session lives on exactly one
+  // machine (the in-process `sessions` Map). Claim the chat for this machine
+  // on first request; if a different machine got there first, return the
+  // fly-replay header so Fly retries the request against the right box.
+  // (No-op when FLY_MACHINE_ID is unset, e.g. local dev with a single process.)
+  if (process.env.FLY_MACHINE_ID) {
+    const { ownerId, claimed } = await claimChat(chatId, INSTANCE_ID)
+    if (!claimed && ownerId !== INSTANCE_ID) {
+      c.header('fly-replay', `instance=${ownerId}`)
+      return c.body(null, 200)
+    }
+    void touchChatOwner(chatId)
+  }
+
   // If the run is bound to an agent, that agent must belong to this user.
   if (agentId) {
     const agent = await getAgent(agentId)
@@ -374,7 +395,17 @@ app.post('/api/agent', async (c) => {
 
 app.post('/api/agent/reset', async (c) => {
   const { chatId } = await c.req.json<{ chatId?: string }>().catch(() => ({ chatId: undefined }))
-  if (chatId) await resetSession(chatId)
+  if (!chatId) return c.json({ ok: true })
+  // The browser session lives on the owning machine — close it there.
+  if (process.env.FLY_MACHINE_ID) {
+    const owner = await claimChat(chatId, INSTANCE_ID)
+    if (!owner.claimed && owner.ownerId !== INSTANCE_ID) {
+      c.header('fly-replay', `instance=${owner.ownerId}`)
+      return c.body(null, 200)
+    }
+  }
+  await resetSession(chatId)
+  await releaseChat(chatId)
   return c.json({ ok: true })
 })
 
@@ -679,14 +710,31 @@ app.get('/api/agents/:id/github', async (c) => {
 app.get('/api/browser/frame', async (c) => {
   const chatId = c.req.query('chatId')
   if (!chatId) return c.json({ error: 'Missing chatId' }, 400)
+  // The screenshot lives only on the owning machine — replay if asked elsewhere.
+  if (process.env.FLY_MACHINE_ID) {
+    const { ownerId, claimed } = await claimChat(chatId, INSTANCE_ID)
+    if (!claimed && ownerId !== INSTANCE_ID) {
+      c.header('fly-replay', `instance=${ownerId}`)
+      return c.body(null, 200)
+    }
+  }
   const f = await currentFrame(chatId)
   return c.json(f ?? { url: '', frame: '' })
 })
 
 // Live view of the agent's real browser — JPEG frames over SSE (legacy).
-app.get('/api/browser/stream', (c) => {
+app.get('/api/browser/stream', async (c) => {
   const chatId = c.req.query('chatId')
   if (!chatId) return c.text('Missing chatId', 400)
+
+  // The frame hub lives only on the owning machine — replay if asked elsewhere.
+  if (process.env.FLY_MACHINE_ID) {
+    const { ownerId, claimed } = await claimChat(chatId, INSTANCE_ID)
+    if (!claimed && ownerId !== INSTANCE_ID) {
+      c.header('fly-replay', `instance=${ownerId}`)
+      return c.body(null, 200)
+    }
+  }
 
   return streamSSE(c, async (stream) => {
     let closed = false

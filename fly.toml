@@ -9,14 +9,33 @@ primary_region = "iad"
   PORT = "8080"
   SERVE_STATIC = "1"
 
+# Two process groups, same Docker image:
+#   • `app`    — the always-on 1 GB baseline. Handles everyday traffic.
+#   • `worker` — 8 GB / 2 perf-CPU overflow. Pre-created but kept SUSPENDED
+#                (zero cost) until the baseline gets busy. Fly auto-resumes
+#                them when concurrent connections to `app` cross the
+#                soft_limit below.
+[processes]
+  app = "npx tsx server/index.ts"
+  worker = "npx tsx server/index.ts"
+
 [http_service]
   internal_port = 8080
   force_https = true
-  # Spin down the machine when no traffic — wake on the first request.
+  # Baseline stays warm (1 machine). Workers suspend when idle, wake on demand.
   auto_stop_machines = "suspend"
   auto_start_machines = true
-  min_machines_running = 0
-  processes = ["app"]
+  min_machines_running = 1
+  processes = ["app", "worker"]
+
+  # Trigger: more than 5 concurrent connections on a machine → Fly routes the
+  # next connection to another machine, waking a suspended 8 GB worker if
+  # needed. We count connections (not requests) because each active user
+  # holds ~1 long-lived SSE stream — close enough to "active users".
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 5
+    hard_limit = 10
 
   [[http_service.checks]]
     interval = "30s"
@@ -25,7 +44,20 @@ primary_region = "iad"
     method = "GET"
     path = "/api/health"
 
+# Baseline — the current 1 GB box. Always on (min_machines_running = 1).
 [[vm]]
   memory = "1gb"
   cpu_kind = "shared"
   cpus = 1
+  processes = ["app"]
+
+# Overflow — 8 GB / 2 performance CPUs. Pre-create N of these ONCE with:
+#     fly scale count worker=3
+# They live in a suspended state at zero cost and auto-wake only when the
+# baseline hits soft_limit. To turn the overflow tier off entirely:
+#     fly scale count worker=0
+[[vm]]
+  memory = "8gb"
+  cpu_kind = "performance"
+  cpus = 2
+  processes = ["worker"]

@@ -2,8 +2,8 @@
  * Agent store — now backed by Postgres (Drizzle). Every agent belongs to a
  * user; all reads/writes are async DB calls.
  */
-import { and, desc, eq, isNull } from 'drizzle-orm'
-import { db, agents, projects, conversations, users } from './db/index.ts'
+import { and, desc, eq, isNull, sql } from 'drizzle-orm'
+import { db, agents, projects, conversations, users, chatOwners } from './db/index.ts'
 import type { AgentRow, ProjectRow, ConversationRow, RunRecord, UserRow } from './db/schema.ts'
 
 export type Agent = AgentRow
@@ -340,4 +340,51 @@ export async function updateRun(id: string, run: RunRecord): Promise<void> {
     ? current.runs.map((r) => (r.id === run.id ? run : r))
     : [run, ...current.runs].slice(0, 50)
   await db.update(agents).set({ runs }).where(eq(agents.id, id))
+}
+
+/* --------------------------- chat owners --------------------------- */
+
+// Sticky routing for the multi-machine Fly pool: each chat's live browser
+// session lives on exactly one machine. The first /api/agent request for a
+// chatId claims it; later requests on other machines see the claim and
+// fly-replay back to the owning machine.
+
+/** Read the Fly machine that owns this chat, if any. */
+export async function getChatOwner(chatId: string): Promise<string | null> {
+  const rows = await db
+    .select({ instanceId: chatOwners.instanceId })
+    .from(chatOwners)
+    .where(eq(chatOwners.chatId, chatId))
+  return rows[0]?.instanceId ?? null
+}
+
+/**
+ * Claim a chat for this machine. If another machine already owns it, the
+ * row is left alone and the caller learns about the conflict from the
+ * `claimed` flag in the return value.
+ */
+export async function claimChat(
+  chatId: string,
+  instanceId: string,
+): Promise<{ ownerId: string; claimed: boolean }> {
+  // ON CONFLICT DO NOTHING — first writer wins, everyone else reads back.
+  await db
+    .insert(chatOwners)
+    .values({ chatId, instanceId })
+    .onConflictDoNothing({ target: chatOwners.chatId })
+  const ownerId = (await getChatOwner(chatId)) ?? instanceId
+  return { ownerId, claimed: ownerId === instanceId }
+}
+
+/** Refresh the lastSeen timestamp on an existing claim. */
+export async function touchChatOwner(chatId: string): Promise<void> {
+  await db
+    .update(chatOwners)
+    .set({ updatedAt: sql`now()` })
+    .where(eq(chatOwners.chatId, chatId))
+}
+
+/** Release a chat — called from the "New run" / reset path. */
+export async function releaseChat(chatId: string): Promise<void> {
+  await db.delete(chatOwners).where(eq(chatOwners.chatId, chatId))
 }
