@@ -16,6 +16,7 @@ dist/
 .DS_Store
 .vscode/
 .idea/
+.claude/
 *.log
 npm-debug.log*
 

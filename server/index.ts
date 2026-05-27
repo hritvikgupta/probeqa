@@ -19,7 +19,7 @@ import { streamSSE } from 'hono/streaming'
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie'
 import type { UIMessage } from 'ai'
 import { runAgent } from './agent.ts'
-import { resetSession, subscribeFrames, currentFrame } from './browser.ts'
+import { resetSession, subscribeFrames, currentFrame, getSession, pushImmediateFrame } from './browser.ts'
 import {
   listAgents,
   getAgent,
@@ -80,6 +80,19 @@ import {
   githubIssues,
   githubCreateIssue,
 } from './composio.ts'
+import {
+  startRecording,
+  stopRecording,
+  getRecordingSteps,
+  saveAsFlow,
+  listFlows,
+  getFlow,
+  renameFlow,
+  deleteFlow,
+  attachFlow,
+  detachFlow,
+  listAttachedFlows,
+} from './recording.ts'
 
 const app = new Hono<{ Variables: { user: SafeUser } }>()
 
@@ -128,6 +141,11 @@ app.use('/api/tickets', requireAuth)
 app.use('/api/tickets/*', requireAuth)
 app.use('/api/email', requireAuth)
 app.use('/api/email/*', requireAuth)
+app.use('/api/recording', requireAuth)
+app.use('/api/recording/*', requireAuth)
+app.use('/api/flows', requireAuth)
+app.use('/api/flows/*', requireAuth)
+app.use('/api/chats/*', requireAuth)
 // Billing — checkout/status need a session; the webhook is verified by signature.
 app.use('/api/billing/checkout', requireAuth)
 app.use('/api/billing/status', requireAuth)
@@ -720,6 +738,220 @@ app.get('/api/browser/frame', async (c) => {
   }
   const f = await currentFrame(chatId)
   return c.json(f ?? { url: '', frame: '' })
+})
+
+/* ---- recording: human-driven flow capture ---- */
+
+// Start a new recording. Body: { startUrl }. Returns { recordingId, chatId }
+// — chatId is what the frontend passes to /api/browser/frame to watch the
+// live browser, same plumbing as quick-chat uses.
+app.post('/api/recording/start', async (c) => {
+  const user = c.get('user')
+  const b = await c.req.json<{ startUrl?: string }>().catch(() => ({}))
+  const startUrl = (b.startUrl || '').trim()
+  if (!startUrl) return c.json({ error: 'startUrl required' }, 400)
+  // Default to https:// if the user typed a bare host — same UX touch as a browser bar.
+  const url = /^https?:\/\//i.test(startUrl) ? startUrl : `https://${startUrl}`
+  try {
+    const { recordingId, chatId } = await startRecording(user.id, url)
+    return c.json({ recordingId, chatId })
+  } catch (e) {
+    return c.json({ error: String(e) }, 500)
+  }
+})
+
+// Live poll of the in-progress step list — used by the Recording UI to render
+// the left pane as steps stream in from the capture script.
+app.get('/api/recording/:id/steps', async (c) => {
+  const user = c.get('user')
+  const id = c.req.param('id')
+  const steps = await getRecordingSteps(user.id, id)
+  if (steps == null) return c.json({ error: 'Not found' }, 404)
+  return c.json({ steps })
+})
+
+// Stop the recording. Closes the browser session and freezes the step list.
+app.post('/api/recording/:id/stop', async (c) => {
+  const user = c.get('user')
+  const id = c.req.param('id')
+  const result = await stopRecording(user.id, id)
+  if (!result) return c.json({ error: 'Not found' }, 404)
+  return c.json(result)
+})
+
+// Forward a mouse event from the frontend pane to the live browser. The
+// frontend captures clicks/moves on the rendered screencast and POSTs the
+// viewport-scaled coordinates here. We synthesize the input on the page
+// via Playwright; the capture script (running in-page) sees the resulting
+// DOM events and records them as steps. The CHAT_ID prefix is "rec-<id>".
+//
+// Body: { x: number, y: number, action: 'click'|'move'|'down'|'up',
+//         button?: 'left'|'right'|'middle', clickCount?: number }
+app.post('/api/recording/:id/mouse', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req
+    .json<{ x?: number; y?: number; action?: string; button?: string; clickCount?: number }>()
+    .catch(() => ({}))
+  const x = Number(b.x)
+  const y = Number(b.y)
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return c.json({ error: 'x/y required' }, 400)
+  const action = b.action || 'click'
+  // Bound to the recording's known chatId — we don't reuse this for any
+  // other browser session, so the prefix is the authorization check.
+  const chatId = `rec-${id}`
+  try {
+    const { page } = await getSession(chatId)
+    const button = (b.button as 'left' | 'right' | 'middle' | undefined) || 'left'
+    if (action === 'click') {
+      await page.mouse.click(x, y, { button, clickCount: b.clickCount || 1 })
+    } else if (action === 'move') {
+      await page.mouse.move(x, y)
+    } else if (action === 'down') {
+      await page.mouse.move(x, y)
+      await page.mouse.down({ button })
+    } else if (action === 'up') {
+      await page.mouse.move(x, y)
+      await page.mouse.up({ button })
+    } else {
+      return c.json({ error: `unknown action: ${action}` }, 400)
+    }
+    // Push a fresh frame immediately so the user sees the result of their
+    // input without waiting for the next polling tick. Don't block the
+    // response on it — let it race the SSE push instead.
+    if (action !== 'move') void pushImmediateFrame(chatId)
+    return c.json({ ok: true })
+  } catch (e) {
+    return c.json({ error: String(e) }, 500)
+  }
+})
+
+// Forward keystrokes from the frontend pane. Two modes:
+//   - { key: 'Enter'|'Tab'|... } → page.keyboard.press(key) for named keys
+//   - { text: 'hello' }          → page.keyboard.type(text) for plain text
+// The capture script's input listener picks up both and records a fill step
+// on blur/Enter. Modifiers (ctrl/alt/shift/meta) can be prefixed in `key`,
+// e.g. "Meta+a" for select-all — Playwright understands that form.
+app.post('/api/recording/:id/key', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req.json<{ key?: string; text?: string }>().catch(() => ({}))
+  const chatId = `rec-${id}`
+  try {
+    const { page } = await getSession(chatId)
+    if (b.text != null) {
+      await page.keyboard.type(b.text)
+    } else if (b.key) {
+      await page.keyboard.press(b.key)
+    } else {
+      return c.json({ error: 'key or text required' }, 400)
+    }
+    void pushImmediateFrame(chatId)
+    return c.json({ ok: true })
+  } catch (e) {
+    return c.json({ error: String(e) }, 500)
+  }
+})
+
+// Forward mouse wheel scrolling. Frontend captures wheel events on the
+// pane and forwards deltaX / deltaY in CSS pixels.
+app.post('/api/recording/:id/scroll', async (c) => {
+  const id = c.req.param('id')
+  const b = await c.req.json<{ deltaX?: number; deltaY?: number }>().catch(() => ({}))
+  const dx = Number(b.deltaX) || 0
+  const dy = Number(b.deltaY) || 0
+  const chatId = `rec-${id}`
+  try {
+    const { page } = await getSession(chatId)
+    await page.mouse.wheel(dx, dy)
+    // Don't push an immediate frame for scroll — wheel events arrive in
+    // bursts (60+/sec) and each screenshot is ~100ms. The 250ms cadence
+    // tick will catch the repaint without backing up the queue.
+    return c.json({ ok: true })
+  } catch (e) {
+    return c.json({ error: String(e) }, 500)
+  }
+})
+
+// Promote a recording into a named saved flow. Body:
+//   { name, description?, params?: { [stepIndex]: paramName } }
+app.post('/api/recording/:id/save', async (c) => {
+  const user = c.get('user')
+  const id = c.req.param('id')
+  const b = await c.req
+    .json<{
+      name?: string
+      description?: string
+      purpose?: string
+      params?: Record<number, string>
+    }>()
+    .catch(() => ({}))
+  const name = (b.name ?? '').trim()
+  const purpose = (b.purpose ?? '').trim()
+  if (!name) return c.json({ error: 'name required' }, 400)
+  // Mandatory: the agent reads `purpose` to know when this flow applies.
+  if (!purpose) return c.json({ error: 'purpose required — explain when the agent should use this flow' }, 400)
+  const flow = await saveAsFlow(user.id, id, name, b.description ?? '', purpose, b.params ?? {})
+  if (!flow) return c.json({ error: 'Recording not found' }, 404)
+  return c.json({ flow })
+})
+
+/* ---- per-chat flow attachments ---- */
+
+// List the flows currently attached to a chat (quick-chat or workspace).
+// Returns the full flow row so the UI can render purpose/step count.
+app.get('/api/chats/:chatId/flows', async (c) => {
+  const user = c.get('user')
+  const chatId = c.req.param('chatId')
+  const flows = await listAttachedFlows(user.id, chatId)
+  return c.json({ flows })
+})
+
+// Attach a flow to a chat. Body: { flowId }
+app.post('/api/chats/:chatId/flows', async (c) => {
+  const user = c.get('user')
+  const chatId = c.req.param('chatId')
+  const b = await c.req.json<{ flowId?: string }>().catch(() => ({}))
+  if (!b.flowId) return c.json({ error: 'flowId required' }, 400)
+  await attachFlow(user.id, chatId, b.flowId)
+  return c.json({ ok: true })
+})
+
+app.delete('/api/chats/:chatId/flows/:flowId', async (c) => {
+  const user = c.get('user')
+  await detachFlow(user.id, c.req.param('chatId'), c.req.param('flowId'))
+  return c.json({ ok: true })
+})
+
+/* ---- flows: per-user saved library ---- */
+
+app.get('/api/flows', async (c) => {
+  const user = c.get('user')
+  const flows = await listFlows(user.id)
+  return c.json({ flows })
+})
+
+app.get('/api/flows/:id', async (c) => {
+  const user = c.get('user')
+  const flow = await getFlow(user.id, c.req.param('id'))
+  if (!flow) return c.json({ error: 'Not found' }, 404)
+  return c.json({ flow })
+})
+
+app.patch('/api/flows/:id', async (c) => {
+  const user = c.get('user')
+  const id = c.req.param('id')
+  const b = await c.req.json<{ name?: string; description?: string }>().catch(() => ({}))
+  if (b.name == null && b.description == null) {
+    return c.json({ error: 'name or description required' }, 400)
+  }
+  await renameFlow(user.id, id, b.name ?? '', b.description)
+  const flow = await getFlow(user.id, id)
+  return c.json({ flow })
+})
+
+app.delete('/api/flows/:id', async (c) => {
+  const user = c.get('user')
+  await deleteFlow(user.id, c.req.param('id'))
+  return c.json({ ok: true })
 })
 
 // Live view of the agent's real browser — JPEG frames over SSE (legacy).

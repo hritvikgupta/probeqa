@@ -18,6 +18,7 @@ import {
 } from 'ai'
 import { buildBrowserTools, buildPlanTools } from './browser.ts'
 import { SYSTEM_PROMPT, PLAN_SYSTEM_PROMPT, RUN_PLAN_PROTOCOL } from './prompt.ts'
+import { listAttachedFlows } from './recording.ts'
 import { getAgent, addRun, updateRun, type Agent, type RunRecord, type RunStep } from './store.ts'
 import { reflectOnRun } from './reflect.ts'
 import { composioToolsFor, connectedToolkits } from './composio.ts'
@@ -69,17 +70,38 @@ function workspaceContext(agent: Agent, includePlan: boolean, connected: string[
   return lines.join('\n')
 }
 
-/** System prompt for the given mode, extended with workspace context. */
-function systemPromptFor(
+/** System prompt for the given mode, extended with workspace + attached-flow context. */
+async function systemPromptFor(
   agent: Agent | undefined,
   mode: AgentMode | undefined,
   connected: string[],
-): string {
+  userId: string | undefined,
+  chatId: string,
+): Promise<string> {
   const base = mode === 'plan' ? PLAN_SYSTEM_PROMPT : SYSTEM_PROMPT
-  if (!agent) return base
-  let prompt = `${base}\n\n${workspaceContext(agent, mode !== 'plan', connected)}`
-  if (mode !== 'plan' && agent.steps.length > 0) {
-    prompt += `\n${RUN_PLAN_PROTOCOL}`
+  let prompt = base
+  if (agent) {
+    prompt += `\n\n${workspaceContext(agent, mode !== 'plan', connected)}`
+    if (mode !== 'plan' && agent.steps.length > 0) {
+      prompt += `\n${RUN_PLAN_PROTOCOL}`
+    }
+  }
+  // Inject attached flows so the model knows which trained sequences are
+  // available + when to use them. The user attaches flows explicitly via
+  // the Quick-chat dropdown or workspace settings; we never auto-attach.
+  if (mode !== 'plan' && userId) {
+    const attached = await listAttachedFlows(userId, chatId).catch(() => [])
+    if (attached.length > 0) {
+      const block = attached
+        .map(
+          (f) =>
+            `• "${f.name}" — ${f.purpose || '(no purpose set)'}` +
+            (f.meta.params.length > 0 ? ` · params: ${f.meta.params.join(', ')}` : '') +
+            ` · ${f.steps.length} steps`,
+        )
+        .join('\n')
+      prompt += `\n\n— ATTACHED RECORDED FLOWS —\nThe user has attached the following human-demonstrated flows to this chat. There is NO replay tool — these are data references. To use a flow:\n  1. Call list_flows() to confirm what's attached + read each purpose.\n  2. If one matches the user's request, call get_flow(name) to load its full steps + cached page index.\n  3. EXECUTE the flow YOURSELF using the atomic browser tools (navigate, click, fill, etc.). Each step in get_flow's response gives you the captured selector + role+name — use those as your targets. The page index tells you what elements exist on each URL.\n  4. After each step, briefly verify the page (look or inspect_page) and ADAPT if it diverges from the recording. Do not plow forward blindly. If a needed param value seems invalid (random/test data where real data is required), stop and ask the user.\n${block}\n\nIf NONE of the purposes match, ignore the flows and use atomic tools normally.`
+    }
   }
   return prompt
 }
@@ -220,12 +242,12 @@ export async function runAgent(
 
   return streamText({
     model: openrouter.chat(process.env.LLM_MODEL || 'x-ai/grok-build-0.1'),
-    system: systemPromptFor(agent, mode, connected),
+    system: await systemPromptFor(agent, mode, connected, userId, chatId),
     messages: await convertToModelMessages(messages),
     // Planning mode gets only the plan tool — it cannot drive a browser.
     tools: planning
       ? buildPlanTools(agentId)
-      : { ...buildBrowserTools(chatId, { agent }), ...composioTools },
+      : { ...buildBrowserTools(chatId, { agent, userId }), ...composioTools },
     // Trim stale screenshots / DOM dumps from history before every step so
     // the re-sent context stays well under the model's token limit.
     prepareStep: ({ messages }) => ({ messages: pruneHeavyResults(messages) }),

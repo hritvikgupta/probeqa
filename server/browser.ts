@@ -14,6 +14,7 @@ import { join } from 'node:path'
 import { totalmem } from 'node:os'
 import { getAgent, updateAgent, type Agent, type TestStep } from './store.ts'
 import { githubCreateIssue } from './composio.ts'
+import { getFlowByName, listAttachedFlows, touchFlowUsed } from './recording.ts'
 
 /**
  * Per-machine cap on concurrent Chromium contexts. Sized from the machine's
@@ -61,6 +62,8 @@ console.log(`[probe-agent] browser concurrency cap: ${BROWSER_CONCURRENCY}`)
 /** Per-run context: the agent whose accounts / settings the agent may use. */
 export interface AgentContext {
   agent?: Agent
+  /** The user owning this run — needed for per-user flow attachments (Quick chat case where there's no workspace agent). */
+  userId?: string
 }
 
 /* ----------------------- live frame hub ----------------------- */
@@ -130,7 +133,7 @@ function getBrowser(): Promise<Browser> {
   return browserPromise
 }
 
-async function getSession(chatId: string): Promise<Session> {
+export async function getSession(chatId: string): Promise<Session> {
   const existing = sessions.get(chatId)
   if (existing) {
     existing.lastUsed = Date.now()
@@ -200,7 +203,9 @@ async function getSession(chatId: string): Promise<Session> {
        repaints, and start at a visible spot so screenshots taken before the
        first click still show "the mouse is here". */
     const installCursor = () => {
-      const root = document.body || document.documentElement
+      // Use documentElement (never replaced by React) so React-heavy SPAs
+      // like LinkedIn can't wipe our overlay during their render cycles.
+      const root = document.documentElement || document.body
       if (!root || document.getElementById('__probe_cursor')) return
       const c = document.createElement('div')
       c.id = '__probe_cursor'
@@ -266,13 +271,11 @@ async function getSession(chatId: string): Promise<Session> {
         { capture: true },
       )
 
-      // Re-attach the cursor if the page's own scripts remove it (SPAs that
-      // rewrite document.body can wipe our overlay).
-      new MutationObserver(() => {
-        if (!document.getElementById('__probe_cursor')) {
-          if (document.body) installCursor()
-        }
-      }).observe(document.documentElement, { childList: true, subtree: true })
+      // No MutationObserver — observing documentElement with subtree:true
+      // fires on every DOM change (hundreds/sec on LinkedIn) and we noticed
+      // it was interfering with React-driven overlays (the compose dialog
+      // would re-open then immediately close). The setInterval watchdog in
+      // ensureCursor is enough — it's debounced and self-stops once stable.
     }
     if (document.body) installCursor()
     else document.addEventListener('DOMContentLoaded', installCursor)
@@ -319,20 +322,26 @@ async function getSession(chatId: string): Promise<Session> {
   }
 
   // Fallback poller — the CDP screencast is flaky in headless and sometimes
-  // emits nothing. While someone is watching, if no screencast frame has
-  // arrived recently, push a plain screenshot so the live view never blanks.
+  // emits nothing. While someone is watching, push a fresh screenshot at a
+  // cadence that depends on the chatId: recording sessions need near-realtime
+  // visual feedback after every click, so they get 200ms throttle / 250ms tick.
+  // Agent-watch sessions stay slow (1500ms throttle) — the agent is moving
+  // slowly anyway and we don't want to flood the wire.
+  const isRecording = chatId.startsWith('rec-')
+  const tickMs = isRecording ? 250 : 900
+  const throttleMs = isRecording ? 200 : 1500
   session.frameTimer = setInterval(() => {
     const hub = hubs.get(chatId)
     if (!hub || hub.subs.size === 0) return
-    if (Date.now() - session.lastFrameAt < 1500) return
+    if (Date.now() - session.lastFrameAt < throttleMs) return
     page
-      .screenshot({ type: 'jpeg', quality: 50 })
+      .screenshot({ type: 'jpeg', quality: isRecording ? 65 : 50 })
       .then((buf) => {
         session.lastFrameAt = Date.now()
         pushFrame(chatId, { url: page.url(), frame: buf.toString('base64') })
       })
       .catch(() => {})
-  }, 900)
+  }, tickMs)
 
   return session
 }
@@ -367,6 +376,39 @@ export async function currentFrame(chatId: string): Promise<Frame | null> {
   }
 }
 
+/**
+ * Capture and broadcast a fresh frame for this session right now. Called by
+ * the recording mouse/key endpoints so the user sees the result of their
+ * input within one screenshot's worth of latency instead of waiting for
+ * the next cadence tick.
+ *
+ * Two safeguards prevent the "half-rendered page" artifact you see when a
+ * click triggers navigation: (a) brief wait for domcontentloaded so the new
+ * page has at least basic structure, (b) per-chat throttle so back-to-back
+ * clicks don't queue concurrent screenshots that all capture intermediate
+ * paints.
+ */
+const lastImmediateAt = new Map<string, number>()
+export async function pushImmediateFrame(chatId: string): Promise<void> {
+  const last = lastImmediateAt.get(chatId) ?? 0
+  if (Date.now() - last < 120) return
+  lastImmediateAt.set(chatId, Date.now())
+  const s = sessions.get(chatId)
+  if (!s) return
+  try {
+    // If a navigation is in flight from the click we just forwarded, wait
+    // briefly for the new page to reach domcontentloaded. Cap at 600ms so a
+    // hanging page doesn't make the UI feel frozen — the cadence ticker
+    // will fill in once it stabilizes.
+    await s.page.waitForLoadState('domcontentloaded', { timeout: 600 }).catch(() => {})
+    const buf = await s.page.screenshot({ type: 'jpeg', quality: 65 })
+    s.lastFrameAt = Date.now()
+    pushFrame(chatId, { url: s.page.url(), frame: buf.toString('base64') })
+  } catch {
+    /* page is mid-transition — next tick will catch up */
+  }
+}
+
 // Evict idle sessions so headless Chromium contexts don't pile up.
 setInterval(() => {
   const now = Date.now()
@@ -383,13 +425,164 @@ setInterval(() => {
 }, 60_000).unref()
 
 /**
+ * Enumerate visible buttons in the "active scope" — the topmost open dialog,
+ * else an open popover/menu, else <main>. Used both by inspect_page to surface
+ * icon-only buttons proactively, and by click() to self-diagnose when a click
+ * fails so the model gets back a useful candidate list instead of just an
+ * error message. No site-specific logic — pure generic geometry / DOM facts.
+ */
+const ENUMERATE_BUTTONS_SCRIPT = `(() => {
+  const isVisible = (el) => {
+    if (!el || el.tagName === 'DIALOG' && !el.open) return false
+    const r = el.getBoundingClientRect()
+    if (r.width === 0 || r.height === 0) return false
+    const cs = getComputedStyle(el)
+    if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity) === 0) return false
+    return true
+  }
+  const findScope = () => {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], dialog')).filter(isVisible)
+    if (dialogs.length > 0) return { el: dialogs[dialogs.length - 1], kind: 'dialog' }
+    const menus = Array.from(document.querySelectorAll('[role="menu"], [role="listbox"], [role="alertdialog"]')).filter(isVisible)
+    if (menus.length > 0) return { el: menus[menus.length - 1], kind: 'menu' }
+    const main = document.querySelector('main')
+    if (main) return { el: main, kind: 'main' }
+    return { el: document.body, kind: 'body' }
+  }
+  const scope = findScope()
+  if (!scope.el) return { scope: 'none', buttons: [], inputs: [] }
+
+  const SHORT = (s) => (s || '').toString().trim().replace(/\\s+/g, ' ').slice(0, 80)
+
+  const buttons = []
+  // Note: include real <a> links + interactive role-tagged divs. Models often
+  // guess role="link" when the real element is a button, or vice versa —
+  // surfacing both in one list means a failed click can show the right
+  // candidate regardless of which role the model originally tried.
+  scope.el.querySelectorAll('button, [role="button"], a, [role="link"], [role="menuitem"], [role="tab"], input[type="submit"], input[type="button"]').forEach((el) => {
+    if (!isVisible(el)) return
+    if (el.disabled) return
+    const aria = el.getAttribute('aria-label') || ''
+    const ariaLabelledby = el.getAttribute('aria-labelledby') || ''
+    const testid = el.getAttribute('data-testid') || ''
+    // Best-guess interactive role: explicit aria role first, then tag-based
+    // mapping. an a-href defaults to "link", button to "button". So a model
+    // looking at role link candidates can tell at a glance whether the
+    // element it wanted is actually a button.
+    const tag = el.tagName.toLowerCase()
+    const explicitRole = el.getAttribute('role') || ''
+    const role = explicitRole || (tag === 'a' ? 'link' : tag === 'button' ? 'button' : tag)
+    const text = SHORT(el.innerText || el.value || '')
+    const svgEl = el.querySelector('svg')
+    const hasSvg = !!svgEl
+    const svgAria = svgEl ? (svgEl.getAttribute('aria-label') || '') : ''
+    const svgTitle = svgEl ? (svgEl.querySelector('title')?.textContent || '') : ''
+    const title = el.getAttribute('title') || ''
+    const href = (tag === 'a' ? el.getAttribute('href') || '' : '')
+    const r = el.getBoundingClientRect()
+    buttons.push({
+      ariaLabel: aria || undefined,
+      title: title || undefined,
+      testid: testid || undefined,
+      tag,
+      role,
+      text: text || undefined,
+      hasSvg,
+      iconOnly: hasSvg && !text,
+      svgHint: SHORT(svgAria || svgTitle) || undefined,
+      ariaLabelledby: ariaLabelledby || undefined,
+      href: href || undefined,
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+    })
+  })
+
+  // Also surface text-style inputs in the active scope so contenteditable
+  // composers / search fields don't get missed.
+  const inputs = []
+  scope.el.querySelectorAll('input, textarea, [contenteditable="true"], [role="textbox"], [role="searchbox"], [role="combobox"]').forEach((el) => {
+    if (!isVisible(el)) return
+    if (el.disabled) return
+    const aria = el.getAttribute('aria-label') || ''
+    const ariaPlaceholder = el.getAttribute('aria-placeholder') || ''
+    const placeholder = el.getAttribute('placeholder') || ''
+    const role = el.getAttribute('role') || (el.tagName === 'INPUT' ? el.type || 'input' : el.tagName.toLowerCase())
+    const contenteditable = el.getAttribute('contenteditable') === 'true'
+    const testid = el.getAttribute('data-testid') || ''
+    const r = el.getBoundingClientRect()
+    inputs.push({
+      ariaLabel: aria || undefined,
+      ariaPlaceholder: ariaPlaceholder || undefined,
+      placeholder: placeholder || undefined,
+      testid: testid || undefined,
+      role,
+      contenteditable: contenteditable || undefined,
+      tag: el.tagName.toLowerCase(),
+      rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+    })
+  })
+
+  return { scope: scope.kind, buttons: buttons.slice(0, 25), inputs: inputs.slice(0, 15) }
+})()`
+
+/**
+ * Per-element hints for inspect_page (the existing "find a selector for this
+ * unnamed input" data). String form so esbuild/tsx doesn't inject __name()
+ * helpers that fail in the browser context.
+ */
+const HINTS_SCRIPT = `(() => {
+  const pick = (el) => {
+    const id = el.id ? '#' + el.id : ''
+    const testid = el.getAttribute('data-testid') || ''
+    const aria = el.getAttribute('aria-label') || ''
+    const role = el.getAttribute('role') || ''
+    const type = el.type || el.tagName.toLowerCase()
+    const placeholder = el.placeholder || ''
+    const nameAttr = el.name || ''
+    const text = (el.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 60)
+    let selector = el.tagName.toLowerCase()
+    if (id) selector += id
+    if (testid) selector += '[data-testid="' + testid + '"]'
+    else if (type && el.tagName.toLowerCase() === 'input') selector += '[type="' + type + '"]'
+    else if (nameAttr) selector += '[name="' + nameAttr + '"]'
+    return {
+      selector,
+      tag: el.tagName.toLowerCase(),
+      type: type || undefined,
+      testid: testid || undefined,
+      ariaLabel: aria || undefined,
+      role: role || undefined,
+      placeholder: placeholder || undefined,
+      name: nameAttr || undefined,
+      text: text || undefined,
+    }
+  }
+  const out = []
+  const seen = new Set()
+  document
+    .querySelectorAll('input, textarea, select, button, [role="button"], [data-testid]')
+    .forEach((el) => {
+      if (seen.has(el)) return
+      seen.add(el)
+      const r = el.getBoundingClientRect()
+      if (r.width === 0 || r.height === 0) return
+      const info = pick(el)
+      if (info.ariaLabel && !info.placeholder && !info.testid) return
+      out.push(info)
+    })
+  return out.slice(0, 40)
+})()`
+
+/**
  * Server-side cursor injection. Belt + suspenders to addInitScript: ensures
  * the cursor exists right before any animation, even if the page's own
  * scripts wiped it or if addInitScript silently failed.
  */
 const CURSOR_INJECT_SCRIPT = `(() => {
   if (window.__probeCursorReady && document.getElementById('__probe_cursor')) return 'already-present';
-  const root = document.body || document.documentElement;
+  // Inject into <html> (documentElement), NOT body — React-heavy SPAs like
+  // LinkedIn replace body subtrees on every navigation and would wipe our
+  // overlay between renders. <html> is essentially never touched.
+  const root = document.documentElement || document.body;
   if (!root) return 'no-root';
   const existing = document.getElementById('__probe_cursor');
   if (existing) existing.remove();
@@ -455,6 +648,33 @@ const CURSOR_INJECT_SCRIPT = `(() => {
     window.__probeRingListenerAdded = true;
   }
   window.__probeCursorReady = true;
+  // Watchdog: occasionally re-attach if a heavy SPA wipes the overlay. Was
+  // 200ms — that's 5 DOM mutations/sec against React, which can interfere
+  // with transient overlays like message compose dialogs (the parent
+  // MutationObserver of the React tree re-runs and stomps state). Slower
+  // tick + only mutate when actually missing avoids that.
+  if (!window.__probeCursorWatchdog) {
+    let consecutiveOk = 0;
+    window.__probeCursorWatchdog = setInterval(() => {
+      const rootNow = document.documentElement || document.body;
+      if (!rootNow) return;
+      const cursorOk = !!document.getElementById('__probe_cursor');
+      const ringOk = !!document.getElementById('__probe_cursor_ring');
+      if (cursorOk && ringOk) {
+        consecutiveOk++;
+        // Once we've been stable for 10 ticks (~15s), stop polling. The
+        // MutationObserver in addInitScript will catch any later wipe.
+        if (consecutiveOk >= 10) {
+          clearInterval(window.__probeCursorWatchdog);
+          window.__probeCursorWatchdog = null;
+        }
+        return;
+      }
+      consecutiveOk = 0;
+      if (!cursorOk) rootNow.appendChild(c);
+      if (!ringOk) rootNow.appendChild(ring);
+    }, 1500);
+  }
   return 'installed';
 })()`
 
@@ -615,6 +835,10 @@ export function buildPlanTools(agentId?: string) {
  */
 export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
   const agent = ctx.agent
+  // userId resolution: workspace runs get it via agent.userId; Quick chat
+  // gets it via ctx.userId passed from runAgent. Either way, the per-user
+  // flow attachments are scoped to this id.
+  const userId = ctx.userId || agent?.userId
 
   return {
     navigate: tool({
@@ -661,59 +885,11 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           // degrades to "just the aria tree" instead of failing the whole call.
           let hints: unknown[] = []
           try {
-            hints = await page.evaluate(() => {
-            const pick = (el: Element) => {
-              const e = el as HTMLElement & {
-                placeholder?: string
-                type?: string
-                name?: string
-                value?: string
-              }
-              const id = e.id ? `#${e.id}` : ''
-              const testid = e.getAttribute('data-testid') || ''
-              const aria = e.getAttribute('aria-label') || ''
-              const role = e.getAttribute('role') || ''
-              const type = e.type || e.tagName.toLowerCase()
-              const placeholder = e.placeholder || ''
-              const nameAttr = e.name || ''
-              // Short visible text (first 60 chars) — for unnamed buttons / divs.
-              const text = (e.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 60)
-              const selectorParts = [e.tagName.toLowerCase()]
-              if (id) selectorParts[0] += id
-              if (testid) selectorParts[0] += `[data-testid="${testid}"]`
-              else if (type && e.tagName.toLowerCase() === 'input')
-                selectorParts[0] += `[type="${type}"]`
-              else if (nameAttr) selectorParts[0] += `[name="${nameAttr}"]`
-              return {
-                selector: selectorParts[0],
-                tag: e.tagName.toLowerCase(),
-                type: type || undefined,
-                testid: testid || undefined,
-                ariaLabel: aria || undefined,
-                role: role || undefined,
-                placeholder: placeholder || undefined,
-                name: nameAttr || undefined,
-                text: text || undefined,
-              }
-            }
-            const out: ReturnType<typeof pick>[] = []
-            const seen = new Set<Element>()
-            // Form fields and buttons are the most common "I need to act on
-            // this but the accessibility tree didn't name it well" cases.
-            document
-              .querySelectorAll('input, textarea, select, button, [role="button"], [data-testid]')
-              .forEach((el) => {
-                if (seen.has(el)) return
-                seen.add(el)
-                const r = el.getBoundingClientRect()
-                if (r.width === 0 || r.height === 0) return // skip hidden
-                const info = pick(el)
-                // If accessibility tree already names it well, skip to save tokens.
-                if (info.ariaLabel && !info.placeholder && !info.testid) return
-                out.push(info)
-              })
-            return out.slice(0, 40)
-            })
+            // Passed as a STRING literal, not a function expression. tsx/esbuild
+            // wraps function literals in __name() calls that aren't defined in
+            // the browser context, which breaks page.evaluate. String form
+            // doesn't get rewritten — same trick we use for ENUMERATE_BUTTONS_SCRIPT.
+            hints = (await page.evaluate(HINTS_SCRIPT)) as unknown[]
           } catch (evalErr) {
             // Page was probably mid-navigation — log and continue with just
             // the aria tree. Tomorrow's call (after the model uses look/
@@ -723,11 +899,22 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
               `[inspect_page] hints unavailable (page in transition): ${String(evalErr).slice(0, 120)}`,
             )
           }
+          // ALSO surface buttons + inputs in the active scope (dialog/menu/main).
+          // This catches icon-only buttons (e.g. send/close/attach) that are
+          // missing or hard to identify in the aria tree alone. Generic shape:
+          // each entry has iconOnly + svgHint + rect so the model can pick a
+          // button by position/icon when names aren't unique.
+          const scope = await page
+            .evaluate(ENUMERATE_BUTTONS_SCRIPT)
+            .catch(() => null) as null | { scope?: string; buttons?: unknown[]; inputs?: unknown[] }
           return {
             ok: true,
             url: page.url(),
             tree: truncate(tree, 6_000),
             hints,
+            activeScope: scope?.scope,
+            scopeButtons: scope?.buttons ?? [],
+            scopeInputs: scope?.inputs ?? [],
           }
         } catch (e) {
           return { ok: false, error: String(e) }
@@ -751,9 +938,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
             const root = sel ? document.querySelector(sel) : document.body
             if (!root) return null
             const clone = root.cloneNode(true) as Element
-            clone
-              .querySelectorAll('script,style,noscript,svg,template,link,meta')
-              .forEach((n) => n.remove())
+            clone.querySelectorAll('script,style,noscript,svg,template,link,meta').forEach((n) => n.remove())
             return clone.outerHTML.replace(/\s+/g, ' ').trim()
           }, selector ?? null)
           if (html == null) return { ok: false, error: `No element matches selector "${selector}"` }
@@ -774,18 +959,245 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           .describe('CSS selector — fallback for unnamed/custom elements only. Example: "button.submit", "[data-testid=continue]".'),
         role: z.string().optional().describe('ARIA role from inspect_page, e.g. "link", "button", "checkbox". Used with `name`.'),
         name: z.string().optional().describe('Accessible name from inspect_page, e.g. "Sign in", "Continue".'),
+        exact: z
+          .boolean()
+          .optional()
+          .describe('Require an EXACT name match (default true). Set false only if you intentionally want a substring match — e.g. matching "Sign in with Google" by passing name="Google" with exact=false.'),
+        nth: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('1-based index — use when a previous click() returned ambiguous:true with multiple alternatives sharing the same name. Pick the alternative whose `index` you want (e.g. nth:2 picks alternatives[1]). When nth is set, the ambiguity check is skipped and the Nth match is clicked directly.'),
       }),
-      execute: async ({ selector, role, name }) => {
+      execute: async ({ selector, role, name, exact, nth }) => {
         const { page } = await getSession(chatId)
         const target = selector ?? `${role ?? ''} "${name ?? ''}"`.trim()
         try {
-          // Capture the URL BEFORE clicking so we can detect navigation.
           const beforeUrl = page.url()
-          const loc = selector
-            ? page.locator(selector)
-            : page.getByRole(role as never, { name: name ?? '' })
+
+          // ── Locator resolution ────────────────────────────────────────────
+          // Strategy: try the SPECIFIC thing the model asked for first
+          // (exact role+name), then progressively widen to handle the common
+          // failure modes WITHOUT making the model retry across LLM rounds:
+          //   1. selector or exact role+name match
+          //   2. fuzzy role+name (case the model's name was a substring)
+          //   3. ANY role + name (model guessed wrong role: link vs button)
+          //   4. getByText (catches role-less divs, contenteditables,
+          //      icon-only controls whose only "label" is the text inside)
+          // We pick the first stage that returns a count > 0. If everything
+          // is empty, we FAIL FAST instead of waiting 8s for a phantom click.
+          let loc
+          if (selector) {
+            loc = page.locator(selector)
+          } else if (name) {
+            const useExact = exact !== false
+            // Try the specific thing the model asked for first, then progressively
+            // widen for the common failure modes (wrong role, role-less text).
+            // We do NOT scope to <main> or any other container — that's a
+            // site-shaped heuristic. When multiple elements match, we surface
+            // the ambiguity and let the model pick the unique full name from
+            // the candidates (same approach Webwright takes: tools are dumb,
+            // the agent disambiguates using unique aria-tree names).
+            const tryStages = [
+              page.getByRole(role as never, { name, exact: true }),
+              ...(useExact ? [page.getByRole(role as never, { name })] : []),
+              ...(['link', 'button', 'menuitem', 'tab', 'treeitem'] as const)
+                .filter((r) => r !== role)
+                .map((r) => page.getByRole(r as never, { name, exact: true })),
+              page.getByText(name, { exact: false }),
+            ]
+            for (const stage of tryStages) {
+              if ((await stage.count()) > 0) {
+                loc = stage
+                break
+              }
+            }
+          } else {
+            return { ok: false, error: 'click() needs either `selector` or `name`.' }
+          }
+
+          // No match → fail fast with candidates so the model can pick the
+          // right ariaLabel/role on the next call.
+          if (!loc || (await loc.count()) === 0) {
+            const diag = (await page
+              .evaluate(ENUMERATE_BUTTONS_SCRIPT)
+              .catch(() => null)) as null | { scope?: string; buttons?: unknown[]; inputs?: unknown[] }
+            return {
+              ok: false,
+              error: `No element matches ${target} (tried exact role+name, fuzzy role+name, other common roles, and getByText).`,
+              scope: diag?.scope,
+              candidates: diag?.buttons ?? [],
+              inputCandidates: diag?.inputs ?? [],
+              hint: 'Pick from candidates by ariaLabel/text. If target isn\'t there, the page may have a dialog/menu open intercepting input. Last resort: run_playwright_code.',
+            }
+          }
+
+          // Ambiguous match (>1 elements with this exact role+name) — surface
+          // all matches with their unique full aria-labels, rects, AND
+          // surrounding context (nearest heading, parent text) so the model
+          // can either re-call with a more specific name OR pass nth:N to
+          // pick by index when names are identical. Picking .first() blindly
+          // is wrong because DOM order rarely matches user intent.
+          const matchCount = await loc.count()
+          // If the model already disambiguated with nth, skip the ambiguity
+          // check and use the Nth match. nth is 1-based for prompt clarity.
+          if (matchCount > 1 && !nth) {
+            // Enumerate up to the first 20 matches with distinguishing info.
+            // We include parentText + nearestHeading so even when N items
+            // share the same accessible name (e.g. multiple "Edit" buttons
+            // in a list), the model can identify which row/section each
+            // belongs to. Use new Function() so esbuild doesn't rewrite the
+            // arrow function (and so Playwright gets a real function, not a
+            // string evaluated as an expression).
+            const handles = await loc.elementHandles()
+            const alternatives: Array<Record<string, unknown>> = []
+            let altErrors = 0
+            for (let i = 0; i < Math.min(handles.length, 20); i++) {
+              try {
+                const info = await handles[i].evaluate((el) => {
+                  const r = el.getBoundingClientRect()
+                  const v = (el as HTMLInputElement).value
+                  const text = ((el as HTMLElement).innerText || v || '').trim().replace(/\s+/g, ' ').slice(0, 100)
+                  let nearestHeading: string | undefined
+                  let parentText: string | undefined
+                  let inActiveDialog = false
+                  let dialogLabel: string | undefined
+                  let n: Element | null = el.parentElement
+                  let depth = 0
+                  while (n && depth < 12) {
+                    if (!nearestHeading) {
+                      const h = n.querySelector('h1,h2,h3,h4,[role="heading"]')
+                      if (h) {
+                        const ht = (h.textContent || '').trim().replace(/\s+/g, ' ')
+                        if (ht) nearestHeading = ht.slice(0, 80)
+                      }
+                    }
+                    if (!parentText && depth >= 1) {
+                      const pt = ((n as HTMLElement).innerText || '').trim().replace(/\s+/g, ' ')
+                      if (pt && pt !== text) parentText = pt.slice(0, 120)
+                    }
+                    if (!inActiveDialog) {
+                      const role = n.getAttribute && n.getAttribute('role')
+                      if (n.tagName === 'DIALOG' || role === 'dialog' || role === 'alertdialog' || role === 'menu' || role === 'listbox') {
+                        inActiveDialog = true
+                        const dl = n.getAttribute('aria-label') || ''
+                        if (dl) dialogLabel = dl.slice(0, 60)
+                      }
+                    }
+                    if (nearestHeading && parentText && inActiveDialog) break
+                    n = n.parentElement
+                    depth++
+                  }
+                  return {
+                    ariaLabel: el.getAttribute('aria-label') || undefined,
+                    text: text || undefined,
+                    href: el.tagName === 'A' ? (el.getAttribute('href') || undefined) : undefined,
+                    tag: el.tagName.toLowerCase(),
+                    role: el.getAttribute('role') || undefined,
+                    nearestHeading,
+                    parentText,
+                    inActiveDialog: inActiveDialog || undefined,
+                    dialogLabel,
+                    rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) },
+                  }
+                })
+                if (info) {
+                  alternatives.push({ index: i + 1, ...(info as Record<string, unknown>) })
+                }
+              } catch (altErr) {
+                altErrors++
+                console.error(
+                  `[click] alternatives evaluate FAILED for handle ${i}/${handles.length}:`,
+                  String(altErr).slice(0, 250),
+                )
+              }
+            }
+            // Sort: alternatives INSIDE an active dialog/menu come first.
+            // When a modal is open, the agent almost certainly meant the
+            // dialog-internal match — generic across any modal-based app.
+            alternatives.sort((a, b) => (b.inActiveDialog ? 1 : 0) - (a.inActiveDialog ? 1 : 0))
+            const dialogMatches = alternatives.filter((a) => a.inActiveDialog).length
+            // If a dialog is open but no name-matches landed inside it, the
+            // target is probably an icon-only button (no text matches "Send"
+            // because the real button has aria-label="Press Enter to send"
+            // or no name at all). Surface the dialog's iconOnly buttons so
+            // the agent can pick by testid / svgHint / rect — generic for
+            // any modal with an icon-only primary action.
+            let dialogIconButtons: unknown[] | undefined
+            if (dialogMatches === 0) {
+              const scopeInfo = (await page
+                .evaluate(ENUMERATE_BUTTONS_SCRIPT)
+                .catch(() => null)) as null | { scope?: string; buttons?: Array<Record<string, unknown>> }
+              if (scopeInfo?.scope === 'dialog' || scopeInfo?.scope === 'menu') {
+                dialogIconButtons = (scopeInfo.buttons ?? []).filter((b) => b.iconOnly)
+              }
+            }
+            console.log(
+              `[click] AMBIGUOUS target=${JSON.stringify(target)} matchCount=${matchCount} alternativesBuilt=${alternatives.length} dialogMatches=${dialogMatches} evalErrors=${altErrors}`,
+            )
+            for (let i = 0; i < alternatives.length; i++) {
+              console.log(`  alt[${i}] →`, JSON.stringify(alternatives[i]).slice(0, 400))
+            }
+            return {
+              ok: false,
+              ambiguous: true,
+              matchCount,
+              error: `${matchCount} elements match ${target}. To disambiguate, call click again with the SAME args plus nth:<index> where index is from the alternatives below.`,
+              alternatives,
+              dialogIconButtons,
+              hint:
+                dialogMatches > 0
+                  ? `A dialog/menu is currently open and ${dialogMatches} of the alternatives are INSIDE it (inActiveDialog:true, sorted first). Pick the dialog-internal one with nth — the others are unrelated matches from the underlying page.`
+                  : dialogIconButtons && dialogIconButtons.length > 0
+                    ? `A dialog is open but NONE of the name-matches are inside it. The target is likely an icon-only button (SVG, no visible text "${name ?? target}"). dialogIconButtons lists the icon-only buttons inside the dialog with their testid / svgHint / rect — pick by data-testid (call click with selector:"[data-testid=...]") or by the icon button closest to bottom-right of the dialog (that is conventionally the primary action / send).`
+                    : 'No dialog open. Use nth:N to pick the alternative whose nearestHeading/parentText matches your intent. Do NOT guess CSS selectors — identical elements share the same selector pattern.',
+            }
+          }
+          // nth path: pick the Nth match (1-based). Bound-check; if nth is out
+          // of range, fall through with an error rather than clicking a
+          // wrong element.
+          if (nth && matchCount > 0) {
+            if (nth > matchCount) {
+              return {
+                ok: false,
+                error: `nth:${nth} is out of range — only ${matchCount} match${matchCount === 1 ? '' : 'es'} for ${target}.`,
+              }
+            }
+            loc = loc.nth(nth - 1)
+          }
+
           await animateMouseTo(page, loc)
-          await loc.first().click({ timeout: 8_000 })
+          // Try a normal click first. If Playwright's actionability checks
+          // fail (overlay intercepts pointer events, element outside viewport,
+          // not visible yet), recover automatically instead of bubbling up
+          // as a generic failure. The model shouldn't have to write
+          // run_playwright_code just because a cookie banner is in the way.
+          let clickStrategy = 'normal'
+          try {
+            await loc.first().click({ timeout: 6_000 })
+          } catch (e1) {
+            const msg1 = String(e1)
+            const isActionabilityErr =
+              /intercept|not visible|outside.*viewport|element is not stable|element is not enabled/i.test(
+                msg1,
+              )
+            if (!isActionabilityErr) throw e1
+            // Stage 1 recovery: scroll into view + force click (skips
+            // actionability checks, including the overlay-intercept check).
+            try {
+              await loc.first().scrollIntoViewIfNeeded({ timeout: 3_000 })
+              await loc.first().click({ force: true, timeout: 4_000 })
+              clickStrategy = 'force'
+            } catch (e2) {
+              // Stage 2 recovery: dispatch the click event directly. This
+              // fires the JS click handler without simulating a real mouse
+              // click at all — bypasses any overlay covering the element
+              // because we're not going through the hit-test pipeline.
+              await loc.first().dispatchEvent('click')
+              clickStrategy = 'dispatch'
+            }
+          }
 
           // Navigation handling — the click may have triggered same-page state
           // change OR full navigation (especially cross-subdomain, e.g.
@@ -811,9 +1223,27 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
             url: afterUrl,
             navigated: beforeUrl !== afterUrl,
             previousUrl: beforeUrl !== afterUrl ? beforeUrl : undefined,
+            // 'normal' = clean click; 'force' = skipped actionability checks
+            // (overlay was in the way); 'dispatch' = fired JS event directly
+            // (real mouse click was blocked). 'force' or 'dispatch' is fine
+            // for triggering the action but signals the page has overlays.
+            strategy: clickStrategy === 'normal' ? undefined : clickStrategy,
           }
         } catch (e) {
-          return { ok: false, error: `Could not click ${target}: ${String(e)}` }
+          // Self-diagnose: enumerate visible buttons in the active scope so
+          // the model can identify icon-only / oddly-labeled controls in the
+          // SAME observation without another round-trip.
+          const diag = await page
+            .evaluate(ENUMERATE_BUTTONS_SCRIPT)
+            .catch(() => null) as null | { scope?: string; buttons?: unknown[]; inputs?: unknown[] }
+          return {
+            ok: false,
+            error: `Could not click ${target}: ${String(e)}`,
+            scope: diag?.scope,
+            candidates: diag?.buttons ?? [],
+            inputCandidates: diag?.inputs ?? [],
+            hint: 'Atomic click failed. Inspect the candidates above (look at iconOnly + svgHint + rect — the send/submit button is usually the icon-only button at the bottom-right of a dialog). If nothing here matches, use run_playwright_code to enumerate or click by position.',
+          }
         }
       },
     }),
@@ -829,14 +1259,81 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           .describe('CSS selector of the field, e.g. "input[type=password]", "#email". Most reliable.'),
         name: z.string().optional().describe('Accessible name / label, used only when no selector is given.'),
         role: z.string().default('textbox').describe('Role of the field when using name; usually "textbox".'),
+        exact: z
+          .boolean()
+          .optional()
+          .describe('Require an EXACT name match (default true). Set false to allow substring matching.'),
+        nth: z
+          .number()
+          .int()
+          .min(1)
+          .optional()
+          .describe('1-based index — use when multiple fields share the same accessible name (e.g. two "Password" inputs on a sign-up form). The Nth match is filled directly.'),
       }),
-      execute: async ({ text, selector, name, role }) => {
+      execute: async ({ text, selector, name, role, exact, nth }) => {
         const { page } = await getSession(chatId)
         const target = selector ?? name ?? '(unspecified)'
         try {
-          const loc = selector
-            ? page.locator(selector)
-            : page.getByRole(role as never, { name: name ?? '' })
+          // Same progressive-widening strategy as click(): try specific then
+          // generic, fail fast if nothing matches. Covers the contenteditable
+          // case (textarea[role=textbox] vs div[role=textbox] vs no role at all).
+          let loc
+          if (selector) {
+            loc = page.locator(selector)
+          } else if (name) {
+            const useExact = exact !== false
+            // Same Webwright-style philosophy as click(): don't scope, just
+            // try the specific thing the agent asked for, progressively widen,
+            // and surface ambiguity rather than blindly picking .first().
+            const tryStages = [
+              page.getByRole(role as never, { name, exact: true }),
+              ...(useExact ? [page.getByRole(role as never, { name })] : []),
+              page.getByRole('textbox' as never, { name, exact: true }),
+              page.getByRole('searchbox' as never, { name, exact: true }),
+              page.getByRole('combobox' as never, { name, exact: true }),
+              page.getByLabel(name, { exact: true }),
+              page.getByPlaceholder(name, { exact: false }),
+            ]
+            for (const stage of tryStages) {
+              if ((await stage.count()) > 0) {
+                loc = stage
+                break
+              }
+            }
+          } else {
+            return { ok: false, error: 'fill() needs either `selector` or `name`.' }
+          }
+
+          if (!loc || (await loc.count()) === 0) {
+            const diag = (await page
+              .evaluate(ENUMERATE_BUTTONS_SCRIPT)
+              .catch(() => null)) as null | { scope?: string; buttons?: unknown[]; inputs?: unknown[] }
+            return {
+              ok: false,
+              error: `No input field matches ${target} (tried role+name with several roles, getByLabel, getByPlaceholder).`,
+              scope: diag?.scope,
+              inputCandidates: diag?.inputs ?? [],
+              candidates: diag?.buttons ?? [],
+              hint: 'Pick from inputCandidates above by ariaLabel/ariaPlaceholder/placeholder/role. If your target field is missing, the active scope may be wrong (no dialog open yet, or wrong dialog).',
+            }
+          }
+
+          const fillCount = await loc.count()
+          if (nth) {
+            if (nth > fillCount) {
+              return { ok: false, error: `nth:${nth} is out of range — only ${fillCount} field${fillCount === 1 ? '' : 's'} match ${target}.` }
+            }
+            loc = loc.nth(nth - 1)
+          } else if (fillCount > 1) {
+            return {
+              ok: false,
+              ambiguous: true,
+              matchCount: fillCount,
+              error: `${fillCount} input fields match ${target}. Call fill again with the same args plus nth:<1-based index> to pick one, or use a more specific name/selector.`,
+              hint: 'Identical-named fields are usually paired (e.g. password + confirm-password). Use nth:1 for the first occurrence and nth:2 for the second — DOM order matches visual order.',
+            }
+          }
+
           await animateMouseTo(page, loc)
           await loc.first().fill(text, { timeout: 8_000 })
           return { ok: true, filled: target }
@@ -993,36 +1490,57 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
       inputSchema: z.object({}),
       execute: async () => {
         const { page } = await getSession(chatId)
+        const url = page.url()
         try {
+          // Always read text observations first — they survive even when the
+          // page is in a heavy/checkpoint state that hangs screenshots.
+          const title = await page.title().catch(() => '')
+          const tree = await page.locator('body').ariaSnapshot({ timeout: 5_000 }).catch(() => '')
+
+          // Screenshot has its own short timeout (8s instead of Playwright's
+          // 30s default) so a slow/blocked page doesn't take down the whole
+          // tool. If it times out we still return the textual observation —
+          // never blank a look() because the image couldn't be captured.
           mkdirSync(SHOTS_DIR, { recursive: true })
           const file = join(SHOTS_DIR, `${chatId}-${Date.now()}.jpg`)
-          const buf = await page.screenshot({ path: file, type: 'jpeg', quality: 55 })
-          const tree = await page.locator('body').ariaSnapshot().catch(() => '')
-          const title = await page.title().catch(() => '')
-          const url = page.url()
-          // Diagnostic log so we can see what the model is being fed each
-          // time it calls look(). Logs a summary, NOT the full base64 image.
+          let imageBase64: string | undefined
+          let imageError: string | undefined
+          try {
+            const buf = await page.screenshot({
+              path: file,
+              type: 'jpeg',
+              quality: 55,
+              timeout: 8_000,
+            })
+            imageBase64 = buf.toString('base64')
+          } catch (shotErr) {
+            imageError = String(shotErr).slice(0, 200)
+            console.log(`[look] screenshot timed out (url=${url}): ${imageError}`)
+          }
+
           console.log(
             `[look] chat=${chatId.slice(0, 8)} url=${url} title=${JSON.stringify(title).slice(0, 80)}` +
-              ` tree=${tree.length}chars image=${Math.round(buf.length / 1024)}KB`,
+              ` tree=${tree.length}chars image=${imageBase64 ? Math.round(imageBase64.length * 0.75 / 1024) + 'KB' : 'failed'}`,
           )
-          // First ~400 chars of the aria tree so we can eyeball what the
-          // model is actually seeing without flooding the log.
           console.log(`[look] tree-head:\n${tree.slice(0, 400)}${tree.length > 400 ? '\n…(truncated)' : ''}`)
+
           return {
             ok: true,
             url,
             title,
             tree: truncate(tree, 5_000),
-            image: buf.toString('base64'),
+            image: imageBase64,
+            imageError,
           }
         } catch (e) {
           console.error('[look] error:', e)
-          return { ok: false, error: String(e) }
+          return { ok: false, url, error: String(e) }
         }
       },
       // Same pattern as screenshot — hand the JPEG to the multimodal model as
-      // a file-data part, plus the textual context next to it.
+      // a file-data part, plus the textual context next to it. The image is
+      // best-effort: if a slow / blocked page made the screenshot time out
+      // we still hand back the URL + aria tree so the agent isn't blinded.
       toModelOutput: ({ output }) => {
         const o = output as {
           ok?: boolean
@@ -1030,23 +1548,26 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           url?: string
           title?: string
           tree?: string
+          imageError?: string
           error?: string
         }
-        if (!o?.ok || !o.image) {
+        if (!o?.ok) {
           return {
             type: 'content',
-            value: [{ type: 'text', text: `Look failed: ${o?.error ?? 'unknown error'}` }],
+            value: [
+              { type: 'text', text: `Look failed: ${o?.error ?? 'unknown error'}\nURL: ${o?.url ?? ''}` },
+            ],
           }
         }
         const txt =
-          `URL: ${o.url ?? ''}\nTitle: ${o.title ?? ''}\n\nAccessibility tree:\n${o.tree ?? ''}`
-        return {
-          type: 'content',
-          value: [
-            { type: 'text', text: txt },
-            { type: 'file-data', data: o.image, mediaType: 'image/jpeg' },
-          ],
-        }
+          `URL: ${o.url ?? ''}\nTitle: ${o.title ?? ''}` +
+          (o.imageError ? `\n[image unavailable: ${o.imageError}]` : '') +
+          `\n\nAccessibility tree:\n${o.tree ?? ''}`
+        const parts: Array<{ type: 'text'; text: string } | { type: 'file-data'; data: string; mediaType: string }> = [
+          { type: 'text', text: txt },
+        ]
+        if (o.image) parts.push({ type: 'file-data', data: o.image, mediaType: 'image/jpeg' })
+        return { type: 'content', value: parts }
       },
     }),
 
@@ -1113,18 +1634,38 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
               })
             } else if (a.type === 'click') {
               const target = a.selector ?? `${a.role ?? ''} "${a.name ?? ''}"`.trim()
-              const loc = a.selector
-                ? page.locator(a.selector)
-                : page.getByRole((a.role as never) ?? 'button', { name: a.name ?? '' })
+              let loc
+              if (a.selector) {
+                loc = page.locator(a.selector)
+              } else {
+                const exactLoc = page.getByRole((a.role as never) ?? 'button', {
+                  name: a.name ?? '',
+                  exact: true,
+                })
+                loc =
+                  (await exactLoc.count()) > 0
+                    ? exactLoc
+                    : page.getByRole((a.role as never) ?? 'button', { name: a.name ?? '' })
+              }
               await animateMouseTo(page, loc)
               await loc.first().click({ timeout: 8_000 })
               await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {})
               results.push({ step: i + 1, type: 'click', ok: true, target, url: page.url() })
             } else if (a.type === 'fill') {
               const target = a.selector ?? a.name ?? '(unspecified)'
-              const loc = a.selector
-                ? page.locator(a.selector)
-                : page.getByRole((a.role as never) ?? 'textbox', { name: a.name ?? '' })
+              let loc
+              if (a.selector) {
+                loc = page.locator(a.selector)
+              } else {
+                const exactLoc = page.getByRole((a.role as never) ?? 'textbox', {
+                  name: a.name ?? '',
+                  exact: true,
+                })
+                loc =
+                  (await exactLoc.count()) > 0
+                    ? exactLoc
+                    : page.getByRole((a.role as never) ?? 'textbox', { name: a.name ?? '' })
+              }
               await animateMouseTo(page, loc)
               await loc.first().fill(a.text, { timeout: 8_000 })
               results.push({ step: i + 1, type: 'fill', ok: true, target })
@@ -1161,6 +1702,58 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           }
         }
         return { ok: true, completed: actions.length, results, url: page.url() }
+      },
+    }),
+
+    run_playwright_code: tool({
+      description:
+        'Escape hatch — execute arbitrary Playwright JavaScript against the current page. Use when atomic tools cannot express what you need: picking among ambiguous matches inline, falling back across multiple selectors, inspecting state mid-action, or any short multi-step logic with conditions. The function receives `page` and `context` (Playwright objects) and runs against the SAME persistent browser session as all other tools. Capture evidence with console.log — anything you log is returned to you as the observation. Keep scripts under ~30 lines; for longer flows, split across turns.',
+      inputSchema: z.object({
+        code: z
+          .string()
+          .describe(
+            'JavaScript that runs as an async function body with `page` and `context` in scope. Use console.log to surface observations (URL, aria snapshot, what worked). Example: `for (const sel of [\'textarea[aria-label*="message"]\', \'[role="textbox"]\']) { const loc = page.locator(sel); if (await loc.count() > 0) { await loc.first().fill("hello"); console.log("filled via", sel); break; } } console.log("URL:", page.url());`',
+          ),
+      }),
+      execute: async ({ code }) => {
+        const { page, context } = await getSession(chatId)
+        // Wrap user code in an async function body. We intercept console.log
+        // so the agent sees its own prints back as the observation (same
+        // pattern Webwright uses with python's redirect_stdout).
+        const wrapped =
+          'const __logs = [];\n' +
+          'const __fmt = (a) => typeof a === "string" ? a : (() => { try { return JSON.stringify(a); } catch { return String(a); } })();\n' +
+          'const console = { log: (...a) => __logs.push(a.map(__fmt).join(" ")), error: (...a) => __logs.push("ERR: " + a.map(__fmt).join(" ")), warn: (...a) => __logs.push("WARN: " + a.map(__fmt).join(" ")), info: (...a) => __logs.push(a.map(__fmt).join(" ")) };\n' +
+          'try {\n' +
+          code +
+          '\n} catch (__err) { __logs.push("THROWN: " + (__err && __err.stack ? __err.stack : String(__err))); throw __err; }\n' +
+          'return __logs.join("\\n");'
+        const startedAt = Date.now()
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
+          const fn = new Function(
+            'page',
+            'context',
+            `return (async () => { ${wrapped} })()`,
+          )
+          const output = await fn(page, context)
+          await ensureCursor(page).catch(() => {})
+          return {
+            ok: true,
+            durationMs: Date.now() - startedAt,
+            url: page.url(),
+            output: truncate(String(output ?? ''), 8_000),
+          }
+        } catch (e) {
+          // Try to still surface any logs the script wrote before it threw.
+          await ensureCursor(page).catch(() => {})
+          return {
+            ok: false,
+            durationMs: Date.now() - startedAt,
+            url: page.url(),
+            error: String(e),
+          }
+        }
       },
     }),
 
@@ -1262,6 +1855,83 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
       execute: async () => {
         const { consoleErrors } = await getSession(chatId)
         return { ok: true, count: consoleErrors.length, errors: consoleErrors.slice(-30) }
+      },
+    }),
+
+    list_flows: tool({
+      description:
+        'List the recorded flows the user ATTACHED to this chat. Returns name + purpose + step count only — call get_flow to read a flow\'s actual steps and stored page data. Use this to discover which flow (if any) matches the user\'s current request by reading each `purpose` string.',
+      inputSchema: z.object({}),
+      execute: async () => {
+        if (!userId) return { ok: false, error: 'No user context — flows are per-user.' }
+        const attached = await listAttachedFlows(userId, chatId)
+        return {
+          ok: true,
+          flows: attached.map((f) => ({
+            name: f.name,
+            purpose: f.purpose,
+            steps: f.steps.length,
+            params: f.meta.params,
+            pagesKnown: f.pages.length,
+          })),
+          hint:
+            attached.length === 0
+              ? 'No flows are attached. Use atomic browser tools (navigate, click, fill, etc.) only.'
+              : 'Pick the flow whose purpose matches the user request, then call get_flow(name) to read its steps + pages. EXECUTE the flow yourself using your atomic tools — there is no replay tool.',
+        }
+      },
+    }),
+
+    get_flow: tool({
+      description:
+        'Read the full data of a recorded flow attached to this chat: the ordered list of demonstrated steps (each with kind, captured selector, role+name, value, paramName) AND the page index — for every URL the recording visited, every interactive element pre-resolved with its selector / role / name / rect / in-dialog flag / svg hint. THIS DATA IS YOUR GUIDE: walk the steps yourself with navigate/click/fill, using each step\'s captured selector AND role+name as your primary targets, and the page index as backup when a selector doesn\'t match. If the live page diverges from the recording, you decide whether to adapt or stop. Substitute any paramName values from the user\'s request (e.g. {"username": "..."}).',
+      inputSchema: z.object({
+        name: z.string().describe('Flow name exactly as list_flows shows it.'),
+      }),
+      execute: async ({ name }) => {
+        if (!userId) return { ok: false, error: 'No user context — flows are per-user.' }
+        const attached = await listAttachedFlows(userId, chatId)
+        const flow = attached.find((f) => f.name === name)
+        if (!flow) {
+          return {
+            ok: false,
+            error: `No flow named "${name}" is attached. Call list_flows to see what's attached.`,
+          }
+        }
+        await touchFlowUsed(userId, flow.id).catch(() => {})
+        return {
+          ok: true,
+          name: flow.name,
+          purpose: flow.purpose,
+          params: flow.meta.params,
+          // Steps the human demonstrated, in order. Carry every captured
+          // field so the agent can pick the most reliable target per step.
+          steps: flow.steps.map((s, i) => ({
+            index: i + 1,
+            kind: s.kind,
+            label: s.label,
+            selector: s.selector,
+            role: s.role,
+            name: s.name,
+            value: s.value,
+            paramName: s.paramName,
+            waitText: s.waitText,
+          })),
+          // Pre-computed element index per URL pattern. When the agent
+          // navigates to one of these URLs during execution, it can read
+          // the cached `elements` / `inputs` to know exactly what's on
+          // the page without inspect_page.
+          pages: flow.pages.map((p) => ({
+            url: p.url,
+            urlPattern: p.urlPattern,
+            title: p.title,
+            elements: p.elements,
+            inputs: p.inputs,
+            networkSignatures: p.networkSignatures,
+          })),
+          hint:
+            'Walk these steps with your atomic tools. Each step gives you the captured selector + role+name — try the selector first via click(selector:...) or fill(selector:..., text:...), and fall back to click(role, name) if it misses. For navigate steps, call navigate(url) with the captured value (or the substituted param). After each step, briefly verify the page matches expectations (look() or inspect_page) and adapt if it diverges — do NOT plow forward blindly. If the user provided random/test values for required params and the flow needs real data (auth credentials, valid email format, etc.), stop and ask before continuing.',
+        }
       },
     }),
   }

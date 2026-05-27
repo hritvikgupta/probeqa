@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { EditorTarget, ConversationMeta } from '../types'
 import AgentChat from './AgentChat'
 import BrowserView from './BrowserView'
+import FlowAttachments from './FlowAttachments'
 import { Plus } from 'lucide-react'
 
 interface Props {
@@ -132,6 +133,7 @@ export default function Editor({ open, target, projectId, onClose }: Props) {
         >
           <Plus size={12} /> New chat
         </button>
+        {activeConvId && <FlowAttachments chatId={activeConvId} />}
         <div className="ed-state">
           <span className="dot" />
           <span>Live agent</span>

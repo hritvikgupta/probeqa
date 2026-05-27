@@ -81,6 +81,10 @@ export default function Sidebar({
       path: '/tickets', label: 'Tickets',
       icon: <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/><line x1="3" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="21"/></svg>,
     },
+    {
+      path: '/recordings', label: 'Recordings',
+      icon: <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/></svg>,
+    },
   ]
 
   const settingsIcon = (

@@ -15,6 +15,7 @@ import Overview from './views/Overview'
 import Runs from './views/Runs'
 import Agents from './views/Agents'
 import Tickets from './views/Tickets'
+import Recordings from './views/Recordings'
 import Settings from './views/Settings'
 import Billing from './views/Billing'
 import BillingSuccess from './views/BillingSuccess'
@@ -203,6 +204,7 @@ export default function App() {
               path="/tickets"
               element={<Tickets key={`tickets-${activeProjectId}`} projectId={activeProjectId} onToast={showToast} />}
             />
+            <Route path="/recordings" element={<Recordings />} />
             <Route
               path="/settings"
               element={<Settings user={user} onUserUpdate={setUser} onToast={showToast} />}
