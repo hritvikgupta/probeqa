@@ -24,6 +24,12 @@ import { countUsage } from './store.ts'
 export const PLAN_LIMITS = {
   free: { projects: 1, agents: 1, runs: 5, credits: null as number | null, creditsPerRun: 0 },
   pro: { projects: null as number | null, agents: null as number | null, runs: 100, credits: 1500, creditsPerRun: 15 },
+  /**
+   * Internal / comped accounts. No quota of any kind. Granted manually via
+   * UPDATE users SET plan = 'unlimited' WHERE email = ... — not exposed
+   * through Dodo or the billing flow.
+   */
+  unlimited: { projects: null as number | null, agents: null as number | null, runs: null as number | null, credits: null as number | null, creditsPerRun: 0 },
 } as const
 
 export type PlanName = keyof typeof PLAN_LIMITS
@@ -36,7 +42,9 @@ const KIND_LABEL: Record<LimitKind, string> = {
 }
 
 function normalizePlan(plan: string): PlanName {
-  return plan === 'pro' ? 'pro' : 'free'
+  if (plan === 'pro') return 'pro'
+  if (plan === 'unlimited') return 'unlimited'
+  return 'free'
 }
 
 /**

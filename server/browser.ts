@@ -120,6 +120,15 @@ interface Session {
   lastUsed: number
   lastFrameAt: number
   frameTimer: ReturnType<typeof setInterval> | null
+  /**
+   * Last known mouse position. Playwright's API doesn't expose the mouse's
+   * current coords, so animateMouseTo needs us to remember where it left
+   * the cursor after the previous move — that's the start point of the
+   * next animation. Initialized to the cursor's default starting position
+   * (matches the addInitScript overlay).
+   */
+  lastMouseX: number
+  lastMouseY: number
 }
 
 const IDLE_MS = 10 * 60 * 1000
@@ -289,6 +298,8 @@ export async function getSession(chatId: string): Promise<Session> {
     lastUsed: Date.now(),
     lastFrameAt: 0,
     frameTimer: null,
+    lastMouseX: 200,
+    lastMouseY: 200,
   }
   sessions.set(chatId, session)
 
@@ -696,19 +707,50 @@ async function ensureCursor(page: Page): Promise<void> {
  * the click/fill fires. Best-effort — if the element can't be located/measured
  * we just no-op and let the action proceed.
  */
-async function animateMouseTo(page: Page, loc: ReturnType<Page['locator']>): Promise<void> {
+async function animateMouseTo(
+  page: Page,
+  loc: ReturnType<Page['locator']>,
+  session?: Session,
+): Promise<void> {
   try {
-    // Belt + suspenders: re-inject the cursor right before we animate, in
-    // case the SPA wiped it since the last action.
     await ensureCursor(page)
     const box = await loc.first().boundingBox({ timeout: 2_000 })
     if (!box) return
     const targetX = box.x + box.width / 2
     const targetY = box.y + box.height / 2
-    // Slow the move so the ~800ms BrowserView poll captures the cursor mid-
-    // path, then dwell at the target so a poll lands while it's hovering.
-    await page.mouse.move(targetX, targetY, { steps: 60 })
-    await page.waitForTimeout(500)
+
+    // The previous animation left the cursor at session.lastMouseX/Y. We
+    // interpolate from there to target in real wall-clock time so the
+    // 500ms screencast cadence catches the cursor mid-path on several
+    // frames — not just before/after. Playwright's `steps:N` option fires
+    // intermediate events back-to-back (microseconds total), which is
+    // invisible at any practical framerate. We hand-roll the timing.
+    const startX = session?.lastMouseX ?? targetX
+    const startY = session?.lastMouseY ?? targetY
+    const dist = Math.hypot(targetX - startX, targetY - startY)
+    // Animate roughly proportional to distance: short hops (~150px) take
+    // ~450ms, long swipes (~1000px) cap at ~900ms. The screencast at
+    // 500ms throttle then captures 1-2 mid-path frames per move.
+    const durationMs = Math.max(350, Math.min(900, dist * 1.2))
+    const segments = Math.max(8, Math.round(durationMs / 40))
+    const segmentDelay = Math.round(durationMs / segments)
+    for (let i = 1; i <= segments; i++) {
+      const t = i / segments
+      // ease-out so the cursor decelerates into the target — looks more
+      // human and the final frame catches the cursor "landing" cleanly.
+      const eased = 1 - Math.pow(1 - t, 2)
+      const x = startX + (targetX - startX) * eased
+      const y = startY + (targetY - startY) * eased
+      await page.mouse.move(x, y)
+      if (i < segments) await page.waitForTimeout(segmentDelay)
+    }
+    // Brief dwell at the target so the next screencast tick captures the
+    // cursor cleanly on the destination before the click handler fires.
+    await page.waitForTimeout(180)
+    if (session) {
+      session.lastMouseX = targetX
+      session.lastMouseY = targetY
+    }
   } catch {
     /* swallow — the action will proceed without the cursor animation */
   }
@@ -975,7 +1017,8 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           .describe('1-based index — use when a previous click() returned ambiguous:true with multiple alternatives sharing the same name. Pick the alternative whose `index` you want (e.g. nth:2 picks alternatives[1]). When nth is set, the ambiguity check is skipped and the Nth match is clicked directly.'),
       }),
       execute: async ({ selector, role, name, exact, nth }) => {
-        const { page } = await getSession(chatId)
+        const session = await getSession(chatId)
+        const { page } = session
         const target = selector ?? `${role ?? ''} "${name ?? ''}"`.trim()
         try {
           const beforeUrl = page.url()
@@ -1171,7 +1214,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
             loc = loc.nth(nth - 1)
           }
 
-          await animateMouseTo(page, loc)
+          await animateMouseTo(page, loc, session)
           // Try a normal click first. If Playwright's actionability checks
           // fail (overlay intercepts pointer events, element outside viewport,
           // not visible yet), recover automatically instead of bubbling up
@@ -1275,7 +1318,8 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
           .describe('1-based index — use when multiple fields share the same accessible name (e.g. two "Password" inputs on a sign-up form). The Nth match is filled directly.'),
       }),
       execute: async ({ text, selector, name, role, exact, nth }) => {
-        const { page } = await getSession(chatId)
+        const session = await getSession(chatId)
+        const { page } = session
         const target = selector ?? name ?? '(unspecified)'
         try {
           // Same progressive-widening strategy as click(): try specific then
@@ -1338,7 +1382,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
             }
           }
 
-          await animateMouseTo(page, loc)
+          await animateMouseTo(page, loc, session)
           await loc.first().fill(text, { timeout: 8_000 })
           return { ok: true, filled: target }
         } catch (e) {
@@ -1651,7 +1695,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
                     ? exactLoc
                     : page.getByRole((a.role as never) ?? 'button', { name: a.name ?? '' })
               }
-              await animateMouseTo(page, loc)
+              await animateMouseTo(page, loc, session)
               await loc.first().click({ timeout: 8_000 })
               await page.waitForLoadState('networkidle', { timeout: 4_000 }).catch(() => {})
               results.push({ step: i + 1, type: 'click', ok: true, target, url: page.url() })
@@ -1670,7 +1714,7 @@ export function buildBrowserTools(chatId: string, ctx: AgentContext = {}) {
                     ? exactLoc
                     : page.getByRole((a.role as never) ?? 'textbox', { name: a.name ?? '' })
               }
-              await animateMouseTo(page, loc)
+              await animateMouseTo(page, loc, session)
               await loc.first().fill(a.text, { timeout: 8_000 })
               results.push({ step: i + 1, type: 'fill', ok: true, target })
             } else if (a.type === 'press_key') {

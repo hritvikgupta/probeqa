@@ -60,10 +60,14 @@ export default function BrowserView({
       if (!stopped) setLive(false)
     }
 
-    // Belt-and-suspenders fallback: occasional poll in case SSE silently
-    // hangs (some proxies / VPNs buffer EventSource). 1.5s is fine because
-    // it's only filling gaps the SSE stream missed.
+    // Primary delivery is SSE above, but Fly's proxy doesn't reliably
+    // route fly-replay'd SSE streams to the owning machine — in production
+    // SSE often silently stops yielding frames. We poll at the same cadence
+    // the server pushes screenshots (500ms) so the fallback is at least as
+    // fast as SSE would be, not 3× slower. /api/browser/frame is a single
+    // request so fly-replay works correctly there.
     let inFlight = false
+    let lastFrameAt = 0
     async function poll() {
       if (stopped || inFlight) return
       inFlight = true
@@ -73,7 +77,10 @@ export default function BrowserView({
           const d = (await r.json()) as { url?: string; frame?: string }
           if (!stopped) {
             setLive(true)
-            if (d.frame) setFrame(d.frame)
+            if (d.frame) {
+              setFrame(d.frame)
+              lastFrameAt = Date.now()
+            }
             if (d.url) setUrl(d.url)
           }
         }
@@ -84,7 +91,11 @@ export default function BrowserView({
       }
     }
     poll()
-    const fallbackId = setInterval(poll, 1500)
+    // 500ms cadence matches the server's screencast throttle. If SSE is
+    // also delivering frames, both updates collapse to the same latest
+    // image — no flicker, just redundant arrival paths.
+    const fallbackId = setInterval(poll, recordingId ? 350 : 500)
+    void lastFrameAt
 
     return () => {
       stopped = true

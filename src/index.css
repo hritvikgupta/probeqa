@@ -407,7 +407,7 @@ a.gh-repo:hover{border-color:var(--ink-3);color:var(--ink)}
 .composer-send svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round;stroke-linejoin:round}
 
 /* test pane */
-.pane{padding:18px;display:flex;flex-direction:column;min-height:0;background:var(--bg)}
+.pane{padding:18px;display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--bg)}
 
 /* browser frame */
 .browser{flex:1;border:1px solid var(--line);border-radius:10px;background:var(--panel);display:flex;flex-direction:column;min-height:0;overflow:hidden}
