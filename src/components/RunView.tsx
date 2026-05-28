@@ -267,7 +267,7 @@ export default function RunView({
           </button>
         </div>
 
-        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: '420px 1fr' }}>
+        <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: '420px minmax(0, 1fr)' }}>
           {/* left — the plan, executed in order */}
           <div
             style={{
@@ -436,7 +436,7 @@ export default function RunView({
             </div>
           </div>
 
-          <div style={{ display: 'flex', minHeight: 0, minWidth: 0 }}>
+          <div style={{ display: 'flex', minHeight: 0, minWidth: 0, overflow: 'hidden' }}>
             <BrowserView chatId={chatId} />
           </div>
         </div>

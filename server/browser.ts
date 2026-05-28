@@ -323,19 +323,23 @@ export async function getSession(chatId: string): Promise<Session> {
 
   // Fallback poller — the CDP screencast is flaky in headless and sometimes
   // emits nothing. While someone is watching, push a fresh screenshot at a
-  // cadence that depends on the chatId: recording sessions need near-realtime
-  // visual feedback after every click, so they get 200ms throttle / 250ms tick.
-  // Agent-watch sessions stay slow (1500ms throttle) — the agent is moving
-  // slowly anyway and we don't want to flood the wire.
+  // cadence chosen for the use case:
+  //   • Recording (rec-*) sessions need near-realtime feedback after each
+  //     click → 200ms throttle / 250ms tick / quality 65
+  //   • Agent-watch sessions (run modal, quick chat) are watching the
+  //     agent click around live → 500ms throttle / 600ms tick / quality 55.
+  //     Faster than the old 1500ms throttle (which made the virtual cursor
+  //     visibly lag), still well under the bandwidth a recording would use.
+  //   • If no subscribers, the screenshot is skipped entirely (hub.subs.size).
   const isRecording = chatId.startsWith('rec-')
-  const tickMs = isRecording ? 250 : 900
-  const throttleMs = isRecording ? 200 : 1500
+  const tickMs = isRecording ? 250 : 600
+  const throttleMs = isRecording ? 200 : 500
   session.frameTimer = setInterval(() => {
     const hub = hubs.get(chatId)
     if (!hub || hub.subs.size === 0) return
     if (Date.now() - session.lastFrameAt < throttleMs) return
     page
-      .screenshot({ type: 'jpeg', quality: isRecording ? 65 : 50 })
+      .screenshot({ type: 'jpeg', quality: isRecording ? 65 : 55 })
       .then((buf) => {
         session.lastFrameAt = Date.now()
         pushFrame(chatId, { url: page.url(), frame: buf.toString('base64') })
