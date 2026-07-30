@@ -16,7 +16,7 @@ type Pt = { x: number; y: number }
 /** Marketing landing page — a faithful React port of the voxel HTML mockup. */
 export default function Landing() {
   const navigate = useNavigate()
-  const [announce, setAnnounce] = useState(true)
+  const [announce, setAnnounce] = useState(false)
   const [typed, setTyped] = useState('')
   const [heroPrompt, setHeroPrompt] = useState('')
 
