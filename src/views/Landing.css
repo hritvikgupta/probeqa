@@ -112,7 +112,7 @@
 .lp .arrow{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round}
 
 /* ============ HERO ============ */
-.lp .hero{padding:14px;background:var(--bg)}
+.lp .hero{padding:14px;background:#ffffff}
 .lp .hero-stage{position:relative;overflow:hidden;background:#0A0B08;min-height:560px;display:grid}
 
 /* Radial particle canvas */
@@ -571,9 +571,9 @@
 .lp .hero-eyebrow{color:var(--ink-3);background:rgba(14,15,12,0.05);border-color:rgba(14,15,12,0.12)}
 .lp .hero-eyebrow .d{background:var(--ink-3);box-shadow:0 0 0 1px var(--ink-4)}
 
-/* Hero stage shares the page background — no separate panel colour */
-.lp .hero-stage{background:var(--bg)}
-.lp .hero-vignette{background:radial-gradient(ellipse 90% 80% at 55% 50%, transparent 0%, rgba(237,235,227,0.35) 80%, rgba(237,235,227,0.75) 100%)}
+/* Hero stage shares the page background — white */
+.lp .hero-stage{background:#ffffff}
+.lp .hero-vignette{background:radial-gradient(ellipse 90% 80% at 55% 50%, transparent 0%, rgba(255,255,255,0.35) 80%, rgba(255,255,255,0.75) 100%)}
 
 /* Telemetry */
 .lp .telemetry{background:rgba(250,248,241,0.92);color:var(--ink-2);border-color:var(--line);box-shadow:inset 2px 0 0 #FFFFFF,inset -2px 0 0 #C7C5BB,inset 0 -3px 0 #B5B3A8}
