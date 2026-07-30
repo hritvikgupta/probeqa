@@ -27,7 +27,7 @@ jobs:
           # nothing here is a patch — only the endpoint is ours, which makes the
           # secret a scoped Worklone token instead of a provider key.
           OPENROUTER__KEY: ${{ secrets.WORKLONE_TOKEN }}
-          OPENROUTER__API_BASE: https://returning-dropped-cancel-reservations.trycloudflare.com/api/llm/v1
+          OPENROUTER__API_BASE: ${{ secrets.WORKLONE_API_BASE }}/api/llm/v1
           CONFIG__MODEL: "openrouter/deepseek/deepseek-v4-flash"
           CONFIG__FALLBACK_MODELS: "[]"
           CONFIG__CUSTOM_MODEL_MAX_TOKENS: "128000"
@@ -46,6 +46,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WORKLONE_TOKEN: ${{ secrets.WORKLONE_TOKEN }}
+          WORKLONE_BASE: ${{ secrets.WORKLONE_API_BASE }}
           PR_REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_SHA: ${{ github.event.pull_request.head.sha }}
@@ -62,7 +63,7 @@ jobs:
             --argjson number "$PR_NUMBER" \
             --argjson comments "$comments" --argjson reviews "$reviews" \
             '{repo:$repo, number:$number, sha:$sha, title:$title, url:$url, runUrl:$runUrl, comments:$comments, reviews:$reviews}' \
-          | curl -sS --max-time 30 -X POST "https://returning-dropped-cancel-reservations.trycloudflare.com/api/cloud-agent/pr/report" \
+          | curl -sS --max-time 30 -X POST "$WORKLONE_BASE/api/cloud-agent/pr/report" \
               -H "authorization: Bearer $WORKLONE_TOKEN" \
               -H "content-type: application/json" \
               --data-binary @- || echo "worklone: report callback failed (the review itself is unaffected)"
