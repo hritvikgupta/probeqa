@@ -112,7 +112,7 @@
 .lp .arrow{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2.2;stroke-linecap:round}
 
 /* ============ HERO ============ */
-.lp .hero{padding:14px;background:var(--bg)}
+.lp .hero{padding:14px;background:#0A0B08}
 .lp .hero-stage{position:relative;overflow:hidden;background:#0A0B08;min-height:560px;display:grid}
 
 /* Radial particle canvas */
@@ -131,9 +131,9 @@
 
 .lp .hero-eyebrow{display:inline-flex;align-items:center;gap:8px;font-family:var(--pixel);font-size:10px;color:var(--grass-deep);text-transform:uppercase;letter-spacing:0.12em;margin-bottom:18px;padding:5px 8px;background:rgba(91,186,59,0.12);border:1px solid rgba(91,186,59,0.3)}
 .lp .hero-eyebrow .d{width:6px;height:6px;background:var(--grass);box-shadow:0 0 0 1px var(--grass-deep)}
-.lp .hero-h{margin:0;font-size:clamp(30px,3.6vw,44px);line-height:1.05;letter-spacing:-0.028em;font-weight:500;color:#0E0F0C}
-.lp .hero-h .soft{display:block;color:#8E8C7E;font-weight:500}
-.lp .hero-sub{margin:16px 0 0;font-size:14px;line-height:1.5;color:#3A3A30;max-width:420px}
+.lp .hero-h{margin:0;font-size:clamp(30px,3.6vw,44px);line-height:1.05;letter-spacing:-0.028em;font-weight:500;color:#EDEBE3}
+.lp .hero-h .soft{display:block;color:#7E7F73;font-weight:500}
+.lp .hero-sub{margin:16px 0 0;font-size:14px;line-height:1.5;color:#B5B3A8;max-width:420px}
 .lp .hero-ctas{display:flex;gap:10px;margin-top:20px;align-items:center}
 .lp .hero-btn-dark{
   display:inline-flex;align-items:center;gap:8px;padding:12px 18px;font-weight:500;font-size:13.5px;
@@ -145,8 +145,8 @@
     0 3px 0 #B5B3A8;
 }
 .lp .hero-btn-dark:hover{background:#1E1F1B}
-.lp .hero-btn-ghost{display:inline-flex;align-items:center;gap:8px;padding:12px 16px;font-weight:500;font-size:13.5px;color:#0E0F0C;background:transparent;border:1px solid #C7C5BB}
-.lp .hero-btn-ghost:hover{background:#EDEBE3}
+.lp .hero-btn-ghost{display:inline-flex;align-items:center;gap:8px;padding:12px 16px;font-weight:500;font-size:13.5px;color:#C9C7BC;background:transparent;border:1px solid #383A30}
+.lp .hero-btn-ghost:hover{background:rgba(255,255,255,0.06)}
 
 /* Cursor-style prompt input box with typing animation —
    centred on the animation's start point. */
@@ -572,8 +572,9 @@
 .lp .hero-eyebrow .d{background:var(--ink-3);box-shadow:0 0 0 1px var(--ink-4)}
 
 /* Hero stage shares the page background — no separate panel colour */
-.lp .hero-stage{background:var(--bg)}
-.lp .hero-vignette{background:radial-gradient(ellipse 90% 80% at 55% 50%, transparent 0%, rgba(237,235,227,0.35) 80%, rgba(237,235,227,0.75) 100%)}
+/* Hero stage — dark background */
+.lp .hero-stage{background:#0A0B08}
+.lp .hero-vignette{background:radial-gradient(ellipse 90% 80% at 55% 50%, transparent 0%, rgba(10,11,8,0.35) 70%, rgba(10,11,8,0.7) 100%)}
 
 /* Telemetry */
 .lp .telemetry{background:rgba(250,248,241,0.92);color:var(--ink-2);border-color:var(--line);box-shadow:inset 2px 0 0 #FFFFFF,inset -2px 0 0 #C7C5BB,inset 0 -3px 0 #B5B3A8}
