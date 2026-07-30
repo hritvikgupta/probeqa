@@ -218,14 +218,14 @@
 .lp .logo.pixel{font-family:var(--pixel);font-size:15px;letter-spacing:0.04em}
 
 /* ============ TECH STACK ============ */
-.lp .stack{padding:44px 32px;background:var(--bg)}
+.lp .stack{padding:44px 32px;background:#0A0B08;border-bottom:1px solid #2B2C27}
 .lp .stack-inner{max-width:1116px;margin:0 auto;display:flex;flex-direction:column;gap:32px}
-.lp .stack-h{margin:0 auto;text-align:center;white-space:nowrap;font-size:clamp(20px,2.4vw,30px);line-height:1.2;letter-spacing:-0.022em;font-weight:500;color:var(--ink)}
-.lp .stack-h .soft{color:var(--ink-3)}
+.lp .stack-h{margin:0 auto;text-align:center;white-space:nowrap;font-size:clamp(20px,2.4vw,30px);line-height:1.2;letter-spacing:-0.022em;font-weight:500;color:#EDEBE3}
+.lp .stack-h .soft{color:#8E8C7E}
 .lp .stack-row{display:flex;gap:20px;flex-wrap:wrap}
 .lp .stack-item{flex:1 1 100px;min-width:88px;display:flex;flex-direction:column;align-items:center;gap:13px;padding:8px 0}
-.lp .stack-item svg{width:30px;height:30px;color:var(--ink)}
-.lp .stack-item .sl{font-family:var(--mono);font-size:11px;color:var(--ink-3);text-transform:uppercase;letter-spacing:0.1em}
+.lp .stack-item svg{width:30px;height:30px;color:#C9C7BC}
+.lp .stack-item .sl{font-family:var(--mono);font-size:11px;color:#7E7F73;text-transform:uppercase;letter-spacing:0.1em}
 
 /* ============ HANDOFF (emails the report · files the GitHub issue) ============ */
 .lp .handoff{padding:44px 32px;background:var(--bg)}
