@@ -32,3 +32,6 @@ fly.toml.bak
 
 # --- Lead-finder output (private prospect list, not for the repo) ---
 scripts/leads/
+
+# agent run captures — may contain screenshots of internal pages
+server/.screenshots/
