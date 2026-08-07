@@ -35,3 +35,23 @@ scripts/leads/
 
 # agent run captures — may contain screenshots of internal pages
 server/.screenshots/
+
+# --- pre-open-source hygiene ---
+# build output
+dist/
+build/
+.next/
+coverage/
+
+# runtime artifacts and captures
+*.log
+*.rdb
+.screenshots/
+__pycache__/
+*.pyc
+
+# local env and OS cruft
+.env
+.env.local
+.env.*.local
+.DS_Store
