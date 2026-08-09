@@ -50,24 +50,8 @@ The left rail is the agent's plan, checked off as each step completes. The right
 
 Probe is a **ReAct loop** over a single persistent browser page. Every turn is exactly: reason about one next step → call one tool → observe the result → repeat, until the goal is met or the agent can prove it isn't reachable.
 
-```mermaid
-flowchart LR
-    GOAL(["Test goal<br/>one sentence"]) --> PLAN["Plan<br/>ordered steps"]
-    PLAN --> R{"Reason<br/>one step at a time"}
-    R -->|"exactly one tool call"| ACT["Act<br/>click · fill · press · navigate"]
-    ACT --> BR["Real browser<br/>Playwright + CDP"]
-    BR --> OBS["Observe<br/>inspect_page · look · get_html"]
-    OBS --> REF{"Reflect<br/>did that do what I expected?"}
-    REF -->|"no — recover"| R
-    REF -->|"yes"| R
-    R -->|"goal met or blocked"| REP(["Report<br/>steps · screenshots · verdict"])
-    REP --> OUT["GitHub issue · email · run record"]
+<img src="docs/assets/diagram-1.svg" alt="Architecture diagram" width="100%" />
 
-    classDef n fill:#F6F8FA,stroke:#C6CDD5,color:#16191D
-    classDef h fill:#FDF0EC,stroke:#E14D2A,color:#16191D
-    class GOAL,PLAN,ACT,BR,OBS,REP,OUT n
-    class R,REF h
-```
 
 ### 1 — Perception: accessibility tree first, DOM last
 
