@@ -1,3 +1,5 @@
+@import url('https://fonts.googleapis.com/css2?family=Google+Sans+Flex:wght@300..700&display=swap');
+
 /* Landing page styles — scoped under .lp so they never leak into the app shell. */
 
 .lp{
@@ -26,7 +28,7 @@
   --accent-soft:#1B3812;
   --pixel:"Silkscreen", "VT323", ui-monospace, monospace;
   --mono:"JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  --sans:"Geist", "Inter", system-ui, sans-serif;
+  --sans:"Google Sans Flex", system-ui, sans-serif;
 
   margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:14px;letter-spacing:-0.005em;-webkit-font-smoothing:antialiased;text-wrap:pretty;
   min-height:100vh;
